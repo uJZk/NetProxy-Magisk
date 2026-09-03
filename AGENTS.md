@@ -162,6 +162,8 @@ Android Root、开机启动、模块命令、快捷设置磁贴、eBPF、热点�
 - Provider 与 selector 的默认值必须落到 `Auto/<group>`——回退到 `direct` 会让用户以为已代理而实际直连。
 - `src/module/NetProxy.apk` 由独立流程维护——本地 Android 构建覆盖它会把调试包发进正式模块。
 - 订阅自定义请求头走 `--headers-file` 而非命令行参数——命令行对全系统可见（`/proc/<pid>/cmdline`），会泄露鉴权 token。
+- 导入 sing-box 完整配置时清除节点的 `domain_resolver`、`bind_interface`、`inet4_bind_address`、`inet6_bind_address`、`protect_path`、`netns` 和 `routing_mark`——原样保留会让 sing-box 启动时报 `domain resolver not found: <来源标签>`，或让节点在本机连不通而日志里没有对应错误。
+- 单个节点协议不受支持时只丢弃该节点并返回 diagnostics——整份 sing-box 文档解析失败会退到节点链接解析器，用户只看到一串 `missing URI scheme`，看不出真正原因。
 - 订阅请求的默认 User-Agent 是 `sing-box`——多数机场按 UA 白名单返回 `Subscription-Userinfo`，改成自定义 UA 会拿到 200 但没有流量信息。
 - 新增此类条款时写故障现象，不写设计理由：现象能阻止下一次回退，理由不能。
 

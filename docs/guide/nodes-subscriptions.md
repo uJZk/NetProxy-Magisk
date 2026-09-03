@@ -7,11 +7,20 @@
 单个链接和本地文件都追加到固定的“本地配置”分组：
 
 - 支持常见节点链接与节点文本。
-- 支持 Clash YAML 和 sing-box JSON。
+- 支持 Clash YAML、SIP008 和 sing-box JSON。
 - 导入不会覆盖已有节点；重复 tag 会自动生成稳定后缀。
 - 本地节点可测速、编辑、导出和删除。
 
 文件导入不会再按文件名创建额外的本地订阅组。
+
+### sing-box 完整配置
+
+sing-box JSON 既可以是只含 `outbounds` 的 Provider 文档，也可以是一份完整客户端配置。订阅返回完整配置时同样按下面的规则处理：
+
+- 只读取 `outbounds` 与 `endpoints` 中的节点，`log`、`dns`、`inbounds`、`route`、`experimental` 等段落忽略。
+- `direct`、`block`、`dns`、`selector`、`urltest` 等内置出站和分组不会导入。分组由 NetProxy 自己的 `Auto/<分组>` 与 `Select/<分组>` 提供，详见[策略分组配置教程](/config/policy-groups)。
+- 节点上的 `domain_resolver` 指向来源配置 `dns` 段的服务器标签，`bind_interface`、`inet4_bind_address`、`inet6_bind_address`、`protect_path`、`netns`、`routing_mark` 绑定来源设备的网络环境。这些字段会被清除，改用模块自身的 DNS 与出站设置；`connect_timeout`、`tcp_fast_open` 这类可移植参数保留。
+- 个别节点使用模块不支持的协议时，其余节点照常导入，未支持的节点单独列在导入结果里。
 
 ## 订阅
 
