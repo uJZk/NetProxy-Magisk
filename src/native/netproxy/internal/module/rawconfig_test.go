@@ -1,6 +1,7 @@
 package module
 
 import (
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -12,13 +13,11 @@ func TestConfigArgsSelectRawConfiguration(t *testing.T) {
 		Raw:         true,
 		RawConfig:   "/m/config/singbox/raw.json",
 		RawServices: "/m/config/singbox/confdir/08_services.json",
-		EBPF:        "/m/runtime/ebpf.json",
 	}
 	args := raw.ConfigArgs("/m/config/singbox")
-	// eBPF 入站必须在场：用户配置删掉 tun 后它是唯一的抓取入口。
+	// 不能注入模块生成的 ebpf.json：配置里已有 ebpf 入站时会叠加成两个。
 	want := []string{
 		"-c", "/m/config/singbox/raw.json",
-		"-c", "/m/runtime/ebpf.json",
 		"-c", "/m/config/singbox/confdir/08_services.json",
 	}
 	if !slices.Equal(args, want) {
@@ -26,6 +25,11 @@ func TestConfigArgsSelectRawConfiguration(t *testing.T) {
 	}
 	if slices.Contains(args, "-C") {
 		t.Fatal("raw mode must not load the managed confdir")
+	}
+	for _, argument := range args {
+		if filepath.Base(argument) == "ebpf.json" {
+			t.Fatal("raw mode must not inject a generated eBPF inbound")
+		}
 	}
 }
 

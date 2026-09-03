@@ -18,6 +18,8 @@ import (
 	"encoding/json/jsontext"
 	json "encoding/json/v2"
 
+	SJSON "github.com/sagernet/sing/common/json"
+
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/fetch"
 )
 
@@ -190,7 +192,7 @@ func Update(ctx context.Context, options Options) (Result, error) {
 		}, nil
 	}
 
-	if err := checkDocument(response.Body); err != nil {
+	if err := CheckDocument(response.Body); err != nil {
 		return Result{}, options.fail(meta, now, err)
 	}
 
@@ -247,15 +249,28 @@ func (options Options) schedule(meta *Meta, now time.Time, interval time.Duratio
 	meta.NextUpdateAt = formatEpoch(next)
 }
 
-// checkDocument 只做廉价的结构预检，真正的校验由 sing-box 完成。
+// CheckDocument 只做廉价的结构预检，协议层校验交给 sing-box。
 // 机场故障时常返回 HTML 错误页并带 200，先在这里拦掉能给出可读得多的原因。
-func checkDocument(body []byte) error {
+//
+// 入站非空是硬性要求：直通模式模块不再生成 eBPF 入站，一份没有入站的配置能
+// 通过 sing-box check、能正常 ready，但一个连接都不会被代理，日志里也没有错误。
+func CheckDocument(body []byte) error {
 	trimmed := strings.TrimSpace(string(body))
 	if trimmed == "" {
 		return errors.New("下载内容为空")
 	}
 	if !strings.HasPrefix(trimmed, "{") {
 		return errors.New("下载内容不是 sing-box 配置对象")
+	}
+	var shape struct {
+		Inbounds []SJSON.RawMessage `json:"inbounds"`
+	}
+	// 用 sing 的解码器，保留 sing-box 配置允许的注释。
+	if err := SJSON.Unmarshal(body, &shape); err != nil {
+		return fmt.Errorf("配置不是合法 JSON: %w", err)
+	}
+	if len(shape.Inbounds) == 0 {
+		return errors.New("配置里没有任何 inbound，代理不会生效；请在配置中声明入站（模块的透明代理入站类型为 ebpf）")
 	}
 	return nil
 }

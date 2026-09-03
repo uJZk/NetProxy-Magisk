@@ -51,10 +51,10 @@ su -c '/data/adb/modules/netproxy/netproxyctl service restart'
 
 直通模式下：
 
-- 加载的是「你的配置 + eBPF 入站 + Service API 文档」。模块不再生成 providers 和 outbounds，节点页、出站模式、Wi-Fi 自动切换和分组选择都不参与运行。
-- eBPF 透明代理入站仍由模块按 `ebpf.conf` 生成，它是模块在 Android 上的抓取手段。配置里可以不写 `tun`；如果两者都没有，核心会正常运行但一个连接都不会被代理。
-- 因此分应用策略（`app` 命令组）在直通模式下依然生效，它是 eBPF 入站的一部分。不需要就执行 `app disable`。
-- 你自己的 `inbounds` 不会被删掉，会和 eBPF 入站并存，注意 tag 不要重名。
+- 加载的只有「你的配置 + Service API 文档」。模块不再生成 providers、outbounds 和 eBPF 入站，节点页、分应用、出站模式、Wi-Fi 自动切换和分组选择都不参与运行。
+- **抓取入口由你的配置声明**。模块在 Android 上的透明代理入站类型是 `ebpf`，在配置里自己写即可；`tun` 也可以，但需要它自己完成路由接管。模块不会再注入一份 eBPF 入站——那会和你配置里已有的叠加成两个，tag 相同直接校验失败，tag 不同则两段 eBPF 程序争抢同一批 TC 挂载点。
+- 因此分应用规则要写在你自己的 `ebpf` 入站里（`include_uid` / `exclude_uid`），`app` 命令组在直通模式下不参与运行。
+- 一份没有任何 `inbounds` 的配置会在 `config raw update` 阶段被直接拒绝。它能通过 `sing-box check`、能正常 ready，但一个连接都不会被代理，日志里也没有错误。
 - 你的配置**不能占用 `127.0.0.1:9090`**。模块只能通过这个端口上的 Service API 判断核心是否就绪，冲突会在 `config raw update` 的检查阶段直接失败并保留旧配置。
 - 下载带 ETag 与 Last-Modified 条件请求，内容没变不重写文件。下载或检查失败时保留上一版可用配置，并在 15 分钟后重试，而不是等满一个更新周期。
 

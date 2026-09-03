@@ -7,13 +7,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/rawconfig"
 )
 
-const sampleConfig = `{"log":{"level":"info"},"outbounds":[{"type":"direct","tag":"direct"}]}`
+const sampleConfig = `{"log":{"level":"info"},"inbounds":[{"type":"ebpf","tag":"ebpf-in"}],"outbounds":[{"type":"direct","tag":"direct"}]}`
 
 func newOptions(t *testing.T, url string) rawconfig.Options {
 	t.Helper()
@@ -204,5 +205,37 @@ func TestScheduling(t *testing.T) {
 	}
 	if rawconfig.Nearest(rawconfig.Meta{NextUpdateEpoch: 42}, 0, now) != 0 {
 		t.Fatal("interval 0 must not schedule anything")
+	}
+}
+
+// 没有入站的配置能通过 sing-box check 却什么都不代理，必须在这里拦下。
+func TestUpdateRejectsConfigWithoutInbound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`{"outbounds":[{"type":"direct","tag":"direct"}]}`))
+	}))
+	defer server.Close()
+
+	options := newOptions(t, server.URL)
+	_, err := rawconfig.Update(context.Background(), options)
+	if err == nil {
+		t.Fatal("a configuration without inbounds must be rejected")
+	}
+	if !strings.Contains(err.Error(), "inbound") {
+		t.Fatalf("unhelpful error: %v", err)
+	}
+	if _, statErr := os.Stat(options.ConfigPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal("the rejected configuration must not be installed")
+	}
+}
+
+// 模块不再注入 eBPF 入站，配置里自带的 ebpf 入站必须原样保留。
+func TestCheckDocumentAcceptsUserSuppliedEBPFInbound(t *testing.T) {
+	config := []byte(`{
+  // 用户自己的抓取入口
+  "inbounds": [{"type": "ebpf", "tag": "ebpf-in"}],
+  "outbounds": [{"type": "direct", "tag": "direct"}]
+}`)
+	if err := rawconfig.CheckDocument(config); err != nil {
+		t.Fatal(err)
 	}
 }
