@@ -36,6 +36,28 @@ sing-box JSON 既可以是只含 `outbounds` 的 Provider 文档，也可以是�
 
 订阅更新不依赖正式服务运行。下载、转换或校验失败时，上一版有效节点会继续保留；服务运行时会继续确认新 Provider 是否已在核心中生效，并在失败时记录待同步状态。
 
+## 完整配置直通
+
+不想用节点与订阅功能、只想让模块运行并自动更新自己那份 sing-box 配置时，使用直通模式。模块按周期下载整份配置，`sing-box check` 通过后原子替换，然后直接运行它。
+
+```sh
+su -c '/data/adb/modules/netproxy/netproxyctl config raw set --interval 21600 https://example.com/config.json'
+su -c '/data/adb/modules/netproxy/netproxyctl config raw update'
+su -c '/data/adb/modules/netproxy/netproxyctl config raw enable'
+su -c '/data/adb/modules/netproxy/netproxyctl service restart'
+```
+
+`config raw show` 查看来源、周期、上次更新时间与失败原因；`config raw disable` 切回托管配置但保留下载；`config raw clear` 一并删除。选项必须写在参数前面，写在后面会直接报错而不是被静默忽略。
+
+直通模式下：
+
+- 只加载你的配置加一份 Service API 文档，模块不再生成 providers、outbounds 和 eBPF 入站。节点页、分应用、出站模式、Wi-Fi 自动切换和分组选择都不参与运行。
+- 流量拦截由你配置里的 `inbounds` 决定，模块不再按 `ebpf.conf` 生成透明代理入站。
+- 你的配置**不能占用 `127.0.0.1:9090`**。模块只能通过这个端口上的 Service API 判断核心是否就绪，冲突会在 `config raw update` 的检查阶段直接失败并保留旧配置。
+- 下载带 ETag 与 Last-Modified 条件请求，内容没变不重写文件。下载或检查失败时保留上一版可用配置，并在 15 分钟后重试，而不是等满一个更新周期。
+
+自动更新由 Worker 驱动，和订阅一样不需要核心在运行；只要设置了地址就会调度，因此可以先拉取确认检查通过，再切换到直通模式。
+
 ## 自动与手动选择
 
 每个非空分组提供：

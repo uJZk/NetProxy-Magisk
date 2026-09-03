@@ -101,6 +101,21 @@ func (l Layout) WiFiState() string { return filepath.Join(l.DevRoot(), "wifi_sta
 // SingBoxConfDir 返回给定 sing-box 配置根目录下的配置片段目录。
 func SingBoxConfDir(singBoxDir string) string { return filepath.Join(singBoxDir, "confdir") }
 
+// SingBoxRawConfig 返回直通模式运行的完整 sing-box 配置。
+func SingBoxRawConfig(singBoxDir string) string { return filepath.Join(singBoxDir, "raw.json") }
+
+// SingBoxRawConfigMeta 返回直通配置的下载状态。
+func SingBoxRawConfigMeta(singBoxDir string) string {
+	return filepath.Join(singBoxDir, "raw.meta.json")
+}
+
+// SingBoxServicesDoc 返回 Service API 静态文档。
+// 直通模式不加载整个 confdir，但必须单独附加这一份：模块只能通过 Service API
+// 判断核心是否就绪，缺了它 waitForServiceReady 会把一次健康的启动判为失败。
+func SingBoxServicesDoc(singBoxDir string) string {
+	return filepath.Join(SingBoxConfDir(singBoxDir), "08_services.json")
+}
+
 // SingBoxRulesDir 返回给定 sing-box 配置根目录下的规则资源目录。
 func SingBoxRulesDir(singBoxDir string) string { return filepath.Join(singBoxDir, "rules") }
 

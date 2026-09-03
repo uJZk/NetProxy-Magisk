@@ -75,6 +75,21 @@ type PrepareResult struct {
 	Providers string `json:"providers"`
 	Outbounds string `json:"outbounds"`
 	EBPF      string `json:"ebpf"`
+	// Raw 为真时模块运行用户提供的完整配置，上面三个生成文件全部为空。
+	Raw         bool   `json:"raw"`
+	RawConfig   string `json:"raw_config,omitempty"`
+	RawServices string `json:"raw_services,omitempty"`
+}
+
+// ConfigArgs 返回本次启动实际交给 sing-box 的配置参数。
+func (result PrepareResult) ConfigArgs(singBoxDir string) []string {
+	if result.Raw {
+		return []string{"-c", result.RawConfig, "-c", result.RawServices}
+	}
+	return []string{
+		"-C", paths.SingBoxConfDir(singBoxDir),
+		"-c", result.Providers, "-c", result.Outbounds, "-c", result.EBPF,
+	}
 }
 
 // AppPolicy 描述分应用代理的持久设置。
@@ -94,6 +109,15 @@ func Prepare(ctx context.Context, options Options, allowEmpty bool) (PrepareResu
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			return PrepareResult{}, err
 		}
+	}
+	raw, err := RawConfigEnabled(options)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	if raw {
+		// 直通模式不生成任何运行时配置：providers、outbounds 和 eBPF 入站都由
+		// 用户配置自己决定，生成后再交给 sing-box 只会和用户配置重复叠加。
+		return prepareRawConfig(options)
 	}
 	providers := filepath.Join(options.RuntimeDir, "providers.json")
 	outbounds := filepath.Join(options.RuntimeDir, "outbounds.json")
@@ -118,6 +142,19 @@ func Prepare(ctx context.Context, options Options, allowEmpty bool) (PrepareResu
 		logService(options, "WARN", "ebpf.package", "skipped", "分应用代理跳过未安装应用: %s", ref.String())
 	}
 	return PrepareResult{RuntimeResult: runtime, Providers: providers, Outbounds: outbounds, EBPF: ebpfPath}, nil
+}
+
+// prepareRawConfig 校验直通模式所需的文件，并给出实际要加载的配置组合。
+func prepareRawConfig(options Options) (PrepareResult, error) {
+	configPath := paths.SingBoxRawConfig(options.SingBoxDir)
+	if _, err := os.Stat(configPath); err != nil {
+		return PrepareResult{}, fmt.Errorf("直通配置不可用，请先执行 config raw update: %w", err)
+	}
+	servicesPath := paths.SingBoxServicesDoc(options.SingBoxDir)
+	if _, err := os.Stat(servicesPath); err != nil {
+		return PrepareResult{}, fmt.Errorf("Service API 文档不可用: %w", err)
+	}
+	return PrepareResult{Raw: true, RawConfig: configPath, RawServices: servicesPath}, nil
 }
 
 func syncRuntimeSelection(path string, runtime catalog.RuntimeResult) error {

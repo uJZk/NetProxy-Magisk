@@ -72,6 +72,10 @@ su -c '/data/adb/modules/netproxy/netproxyctl sub list'
 su -c '/data/adb/modules/netproxy/netproxyctl sub update <分组 ID>'
 su -c '/data/adb/modules/netproxy/netproxyctl sub update-all'
 su -c '/data/adb/modules/netproxy/netproxyctl sub history <分组 ID>'
+su -c '/data/adb/modules/netproxy/netproxyctl config raw set --interval 21600 https://example.com/config.json'
+su -c '/data/adb/modules/netproxy/netproxyctl config raw update'
+su -c '/data/adb/modules/netproxy/netproxyctl config raw enable'
+su -c '/data/adb/modules/netproxy/netproxyctl config raw show'
 su -c '/data/adb/modules/netproxy/netproxyctl sub cancel <分组 ID>'
 ```
 

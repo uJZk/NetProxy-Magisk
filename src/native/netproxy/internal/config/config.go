@@ -24,6 +24,11 @@ type ModuleConfig struct {
 	WiFiSSIDMode    string `json:"wifi_ssid_mode"`
 	WiFiSSIDList    string `json:"wifi_ssid_list"`
 	ProxyOnCellular bool   `json:"proxy_on_cellular"`
+	ConfigMode      string `json:"config_mode"`
+	RawConfigURL    string `json:"raw_config_url"`
+	RawConfigUA     string `json:"raw_config_user_agent"`
+	// RawConfigInterval 单位是秒，0 表示只手动更新。
+	RawConfigInterval int64 `json:"raw_config_interval"`
 }
 
 // DefaultModule 返回全新配置使用的唯一默认值集合。
@@ -34,6 +39,9 @@ func DefaultModule() ModuleConfig {
 		ActiveGroupID:   "default",
 		WiFiSSIDMode:    "blacklist",
 		ProxyOnCellular: true,
+		ConfigMode:      "managed",
+
+		RawConfigInterval: 86400,
 	}
 }
 
@@ -81,6 +89,8 @@ func LoadModule(path string) (ModuleConfig, error) {
 		"ACTIVE_GROUP_ID": true, "SELECTED_NODE_REF": true,
 		"WIFI_AUTO_SWITCH": true, "WIFI_SSID_MODE": true,
 		"WIFI_SSID_LIST": true, "PROXY_ON_CELLULAR": true,
+		"CONFIG_MODE": true, "RAW_CONFIG_URL": true,
+		"RAW_CONFIG_USER_AGENT": true, "RAW_CONFIG_INTERVAL": true,
 	}
 	for key := range values {
 		if !allowed[key] {
@@ -114,7 +124,36 @@ func LoadModule(path string) (ModuleConfig, error) {
 	if config.ProxyOnCellular, err = boolValue(values, "PROXY_ON_CELLULAR", config.ProxyOnCellular); err != nil {
 		return ModuleConfig{}, err
 	}
+	if config.ConfigMode = valueOr(values, "CONFIG_MODE", config.ConfigMode); config.ConfigMode != "managed" && config.ConfigMode != "raw" {
+		return ModuleConfig{}, fmt.Errorf("CONFIG_MODE 无效: %s", config.ConfigMode)
+	}
+	config.RawConfigURL = valueOr(values, "RAW_CONFIG_URL", "")
+	if config.RawConfigURL != "" && !strings.HasPrefix(config.RawConfigURL, "http://") && !strings.HasPrefix(config.RawConfigURL, "https://") {
+		return ModuleConfig{}, fmt.Errorf("RAW_CONFIG_URL 必须是 http(s) 地址: %s", config.RawConfigURL)
+	}
+	config.RawConfigUA = valueOr(values, "RAW_CONFIG_USER_AGENT", "")
+	if config.RawConfigInterval, err = intValue(values, "RAW_CONFIG_INTERVAL", config.RawConfigInterval); err != nil {
+		return ModuleConfig{}, err
+	}
+	if config.RawConfigInterval < 0 {
+		return ModuleConfig{}, fmt.Errorf("RAW_CONFIG_INTERVAL 不能为负: %d", config.RawConfigInterval)
+	}
+	if config.ConfigMode == "raw" && config.RawConfigURL == "" {
+		return ModuleConfig{}, errors.New("CONFIG_MODE=raw 需要先设置 RAW_CONFIG_URL")
+	}
 	return config, nil
+}
+
+func intValue(values map[string]string, key string, fallback int64) (int64, error) {
+	value, ok := values[key]
+	if !ok || strings.TrimSpace(value) == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s 不是整数: %s", key, value)
+	}
+	return parsed, nil
 }
 
 // UpdateModule 更新并校验 module.conf，校验失败时不会替换原文件。

@@ -150,8 +150,10 @@ func StartService(ctx context.Context, options Options) error {
 	if err := checkPreparedConfiguration(ctx, options, prepared); err != nil {
 		return failServiceStart(options, 0, 0, "sing-box 配置检查失败", err)
 	}
-	if err := syncRuntimeSelection(options.ModuleConfig, prepared.RuntimeResult); err != nil {
-		return failServiceStart(options, 0, 0, "运行时选择状态同步失败", err)
+	if !prepared.Raw {
+		if err := syncRuntimeSelection(options.ModuleConfig, prepared.RuntimeResult); err != nil {
+			return failServiceStart(options, 0, 0, "运行时选择状态同步失败", err)
+		}
 	}
 
 	command, logFile, err := newSingBoxCommand(options, prepared)
@@ -179,10 +181,13 @@ func StartService(ctx context.Context, options Options) error {
 		return failServiceStart(options, pid, startedAt, "核心或控制接口未在限定时间内就绪", err)
 	}
 	startedAt = actualStartedAt
-	syncOptions := options
-	syncOptions.SkipServiceReload = true
-	if _, err := SyncSelection(ctx, syncOptions); err != nil {
-		return failServiceStart(options, pid, startedAt, "运行时节点选择同步失败", err)
+	// 直通模式没有 Auto/<group> 与 Select/<group> 出站图，节点选择同步无从谈起。
+	if !prepared.Raw {
+		syncOptions := options
+		syncOptions.SkipServiceReload = true
+		if _, err := SyncSelection(ctx, syncOptions); err != nil {
+			return failServiceStart(options, pid, startedAt, "运行时节点选择同步失败", err)
+		}
 	}
 	readyAt := time.Now().Unix()
 	if err := writeServiceState(options.StateFile, "ready", int64(pid), startedAt, readyAt, ""); err != nil {
@@ -429,8 +434,8 @@ func newSingBoxCommand(options Options, prepared PrepareResult) (*exec.Cmd, *os.
 	if err != nil {
 		return nil, nil, err
 	}
-	command := exec.Command(options.SingBoxPath, "run", "-C", paths.SingBoxConfDir(options.SingBoxDir),
-		"-c", prepared.Providers, "-c", prepared.Outbounds, "-c", prepared.EBPF)
+	command := exec.Command(options.SingBoxPath,
+		append([]string{"run"}, prepared.ConfigArgs(options.SingBoxDir)...)...)
 	command.Dir = options.SingBoxDir
 	command.Stdout = logFile
 	command.Stderr = logFile
@@ -439,8 +444,8 @@ func newSingBoxCommand(options Options, prepared PrepareResult) (*exec.Cmd, *os.
 }
 
 func checkPreparedConfiguration(ctx context.Context, options Options, prepared PrepareResult) error {
-	command := exec.CommandContext(ctx, options.SingBoxPath, "check", "-C", paths.SingBoxConfDir(options.SingBoxDir),
-		"-c", prepared.Providers, "-c", prepared.Outbounds, "-c", prepared.EBPF)
+	command := exec.CommandContext(ctx, options.SingBoxPath,
+		append([]string{"check"}, prepared.ConfigArgs(options.SingBoxDir)...)...)
 	command.Dir = options.SingBoxDir
 	command.Stdout = os.Stderr
 	command.Stderr = os.Stderr

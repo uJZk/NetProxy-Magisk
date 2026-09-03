@@ -526,6 +526,11 @@ func runModuleConfig(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return errors.New("缺少 config 操作")
 	}
+	// raw 在 config 下再分一层子命令，必须先把操作词摘掉再交给 flag 解析，
+	// 否则 flag 会在 "set" 处停下，后面所有开关都被当成位置参数悄悄丢弃。
+	if args[0] == "raw" {
+		return runModuleConfigRaw(ctx, args[1:])
+	}
 	flags := newFlagSet("module config")
 	values := bindModuleFlags(flags)
 	if err := flags.Parse(args[1:]); err != nil {
@@ -567,6 +572,79 @@ func runModuleConfig(ctx context.Context, args []string) error {
 		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config." + action, Message: "配置检查通过", Data: map[string]string{"target": positionals[0]}})
 	default:
 		return fmt.Errorf("未知 config 操作 %q", action)
+	}
+	return nil
+}
+
+// runModuleConfigRaw 处理直通完整配置。挂在既有 config 命令组下，
+// 避免新增命令组带来 Android、WebUI 和契约测试的同步改动。
+func runModuleConfigRaw(ctx context.Context, args []string) error {
+	flags := newFlagSet("module config raw")
+	values := bindModuleFlags(flags)
+	intervalFlag := flags.Int64("interval", 86400, "自动更新周期（秒），0 表示只手动更新")
+	userAgentFlag := flags.String("user-agent", "", "下载 User-Agent")
+	forceFlag := flags.Bool("force", false, "忽略 ETag 强制重新下载")
+	// 分两段解析：moduleArgs 会把 --module-dir 插在子命令词之前，一次解析会在
+	// 操作词处停下，之后的开关全部落进位置参数被静默忽略。
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	operation := "show"
+	positionals := flags.Args()
+	if len(positionals) > 0 {
+		operation = positionals[0]
+		if err := flags.Parse(positionals[1:]); err != nil {
+			return err
+		}
+		positionals = flags.Args()
+	}
+	options := values.options()
+	// Go 的 flag 在第一个位置参数处停止解析，写成 `set <URL> --interval 3600`
+	// 会让开关被当成位置参数静默忽略，配置就和用户以为的不一样了。
+	for _, positional := range positionals {
+		if strings.HasPrefix(positional, "-") {
+			return fmt.Errorf("选项必须写在参数前面: config raw %s %s <URL>", operation, positional)
+		}
+	}
+	interval, userAgent, force := *intervalFlag, *userAgentFlag, *forceFlag
+	switch operation {
+	case "show":
+		state, err := moduleapp.ReadRawConfig(options)
+		if err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config.raw", Message: "直通配置状态", Data: state})
+	case "set":
+		if len(positionals) == 0 {
+			return errors.New("config raw set 需要配置地址")
+		}
+		if err := moduleapp.SetRawConfigSource(options, positionals[0], interval, userAgent); err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config.raw_set", Message: "直通配置来源已保存", Data: map[string]any{"url": positionals[0], "interval": interval}})
+	case "update":
+		updated, err := moduleapp.UpdateRawConfig(ctx, options, force)
+		if err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config.raw_updated", Message: "直通配置已更新", Data: updated})
+	case "enable":
+		if err := moduleapp.EnableRawConfig(options); err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config.raw_enabled", Message: "已切换到直通配置", Data: map[string]string{"mode": "raw"}})
+	case "disable":
+		if err := moduleapp.DisableRawConfig(options); err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config.raw_disabled", Message: "已切回托管配置", Data: map[string]string{"mode": "managed"}})
+	case "clear":
+		if err := moduleapp.ClearRawConfig(options); err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config.raw_cleared", Message: "直通配置已清除", Data: map[string]string{"mode": "managed"}})
+	default:
+		return fmt.Errorf("未知 config raw 操作 %q", operation)
 	}
 	return nil
 }
