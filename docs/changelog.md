@@ -2,6 +2,33 @@
 
 本页收录 GitHub Releases 中发布的正式版本，按发布时间倒序排列；不包含持续更新的 `nightly Pre-release`。
 
+## 版本 8.2.0（2026-09-03）
+
+8.2 支持直接使用 sing-box 完整配置：既可以从中导入节点，也可以让模块按周期下载并直接运行整份配置。
+
+### 导入完整配置
+
+- 节点链接、Clash YAML 和 SIP008 之外，`node import` 与 `sub add` 现在能可靠处理完整的 sing-box 客户端配置。
+- 只读取 `outbounds` 与 `endpoints` 中的节点，`log`、`dns`、`inbounds`、`route` 等段落忽略；`direct`、`block`、`selector`、`urltest` 等内置出站和分组不会导入，分组仍由 `Auto/<分组>` 与 `Select/<分组>` 提供。
+- 导入后清除 `domain_resolver`，以及 `bind_interface`、`inet4_bind_address`、`inet6_bind_address`、`protect_path`、`netns`、`routing_mark`。这些字段指向来源配置的 DNS 标签或来源设备的网络环境，保留会让 sing-box 启动时报 `domain resolver not found`，或让节点在本机静默连不通。`connect_timeout`、`tcp_fast_open` 等可移植参数保留。
+- 个别节点使用模块不支持的协议时，其余节点照常导入，未支持的节点单独列在导入结果的 `diagnostics` 中。
+
+### 完整配置直通
+
+- 新增直通模式：模块按周期下载整份 sing-box 配置，`sing-box check` 通过后原子替换并直接运行，适合不使用节点与订阅功能、只想运行自己那份配置的用户。
+- 命令挂在既有 `config` 命令组下：`config raw set|update|enable|disable|clear|show`。
+- 直通模式只加载用户配置与 Service API 文档，不再生成 providers、outbounds 和 eBPF 入站；抓取入口由用户配置自己声明，模块的透明代理入站类型为 `ebpf`。没有任何 `inbounds` 的配置会在下载阶段被拒绝。
+- 下载带 ETag 与 Last-Modified 条件请求，换地址后强制重新下载；下载或检查失败时保留上一版可用配置，并在 15 分钟后重试。
+- 自动更新由 Worker 调度，与订阅一样不依赖核心是否在运行。
+
+### 升级说明
+
+- `module.conf` 新增 `CONFIG_MODE`、`RAW_CONFIG_URL`、`RAW_CONFIG_USER_AGENT` 与 `RAW_CONFIG_INTERVAL`，默认 `managed`，既有行为不变。
+- 直通配置保存在 `config/singbox/raw.json`，已加入安装脚本的保留清单，模块更新不会清掉它。
+- 直通模式下用户配置不能占用 `127.0.0.1:9090`，该端口由模块的 Service API 使用；冲突会在 `config raw update` 的检查阶段失败并保留旧配置。
+
+* * *
+
 ## 版本 8.1.1（2026-08-27）
 
 8.1.1 更新默认 DNS 与分流规则，统一内置规则标签和自动维护来源。
