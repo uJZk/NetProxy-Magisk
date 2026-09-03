@@ -162,6 +162,14 @@ Android Root、开机启动、模块命令、快捷设置磁贴、eBPF、热点�
 - Provider 与 selector 的默认值必须落到 `Auto/<group>`——回退到 `direct` 会让用户以为已代理而实际直连。
 - `src/module/NetProxy.apk` 由独立流程维护——本地 Android 构建覆盖它会把调试包发进正式模块。
 - 订阅自定义请求头走 `--headers-file` 而非命令行参数——命令行对全系统可见（`/proc/<pid>/cmdline`），会泄露鉴权 token。
+- 导入 sing-box 完整配置时清除节点的 `domain_resolver`、`bind_interface`、`inet4_bind_address`、`inet6_bind_address`、`protect_path`、`netns` 和 `routing_mark`——原样保留会让 sing-box 启动时报 `domain resolver not found: <来源标签>`，或让节点在本机连不通而日志里没有对应错误。
+- 单个节点协议不受支持时只丢弃该节点并返回 diagnostics——整份 sing-box 文档解析失败会退到节点链接解析器，用户只看到一串 `missing URI scheme`，看不出真正原因。
+- 直通模式加载 `raw.json` 与 `08_services.json`，绝不能再带 `-C confdir`——sing-box 合并多份配置是数组追加而非覆盖，托管配置会和用户配置叠加出重复的 `inbounds`、`dns.servers` 和出站标签，核心起不来且报错指向用户配置。
+- `singbox/raw.json` 与 `singbox/raw.meta.json` 必须列进 `customize.sh` 的两份保留清单——漏掉会在模块更新后删掉直通配置却保留 `CONFIG_MODE=raw`，开机时服务直接起不来，直到用户手动重新下载。
+- 直通模式不得注入模块生成的 eBPF 入站——用户配置通常自带 `ebpf` 入站，追加一份会叠加成两个：tag 同为 `ebpf-in` 直接校验失败，tag 不同则两段 eBPF 程序抢同一批 TC 挂载点。抓取入口由用户配置声明。
+- 直通配置必须校验 `inbounds` 非空——没有入站的配置能通过 `sing-box check`、能正常 ready，但一个连接都不会被代理，日志里没有任何错误。
+- 直通配置必须先落候选文件、`sing-box check` 通过后再原子替换——直接覆盖会让一次坏更新在下次开机时才暴露，且没有可回退的上一版。
+- `config raw` 的子命令要分两段解析 flag——`moduleArgs` 把 `--module-dir` 插在子命令词之前，一次解析会在操作词处停下，`--interval` 之类的开关会被当成位置参数静默丢弃，用户看到的周期和实际保存的不一致。
 - 订阅请求的默认 User-Agent 是 `sing-box`——多数机场按 UA 白名单返回 `Subscription-Userinfo`，改成自定义 UA 会拿到 200 但没有流量信息。
 - 新增此类条款时写故障现象，不写设计理由：现象能阻止下一次回退，理由不能。
 

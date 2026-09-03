@@ -17,6 +17,7 @@ import (
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/logfile"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/provider"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/rawconfig"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/serviceapi"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/subscription"
 )
@@ -69,6 +70,7 @@ type Options struct {
 	LogFile        string
 	ModuleConf     string
 	SingBoxPath    string
+	SingBoxDir     string
 	ServiceAddress string
 	ServiceSecret  string
 	ProxyURL       string
@@ -113,6 +115,7 @@ func NewOptions(root string) Options {
 	return Options{
 		Root:           root,
 		ProgressDir:    layout.ProgressDir(),
+		SingBoxDir:     layout.SingBoxDir(),
 		PIDFile:        layout.WorkerPID(),
 		ServiceAddress: "127.0.0.1:9090",
 		ServiceSecret:  defaultServiceSecret,
@@ -300,6 +303,12 @@ func RunDue(ctx context.Context, options Options, now time.Time, logger *log.Log
 		return Summary{}, err
 	}
 	summary := Summary{Updated: []string{}, Failed: []string{}, Nearest: schedule.Nearest}
+	if nearest, rawErr := runDueRawConfig(ctx, options, now, logger); rawErr != nil {
+		summary.Failed = append(summary.Failed, rawConfigTarget)
+		summary.failureKinds = append(summary.failureKinds, classifyWorkerError(rawErr))
+	} else if nearest > 0 && (summary.Nearest == 0 || nearest < summary.Nearest) {
+		summary.Nearest = nearest
+	}
 	for _, groupID := range schedule.Due {
 		if err := ctx.Err(); err != nil {
 			return summary, err
@@ -502,6 +511,57 @@ func nextUpdate(root string, now int64) (int64, error) {
 		return 0, err
 	}
 	return schedule.Nearest, nil
+}
+
+// rawConfigTarget 是直通配置在 Summary 里的标识，和订阅分组 ID 区分开。
+const rawConfigTarget = "raw-config"
+
+// runDueRawConfig 在直通配置到期时更新它，并返回下一次更新时间。
+// 更新与订阅一样不依赖 sing-box 是否在运行；只要模块配置里填了地址就会调度，
+// 这样用户可以先把配置拉下来，确认检查通过后再切换到直通模式。
+func runDueRawConfig(ctx context.Context, options Options, now time.Time, logger *log.Logger) (int64, error) {
+	if strings.TrimSpace(options.ModuleConf) == "" || strings.TrimSpace(options.SingBoxDir) == "" {
+		return 0, nil
+	}
+	module, err := workerLoadModule(options.ModuleConf)
+	if err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(module.RawConfigURL) == "" {
+		return 0, nil
+	}
+	interval := time.Duration(module.RawConfigInterval) * time.Second
+	metaPath := paths.SingBoxRawConfigMeta(options.SingBoxDir)
+	meta, err := rawconfig.LoadMeta(metaPath)
+	if err != nil {
+		return 0, err
+	}
+	if !rawconfig.Due(meta, interval, now) {
+		return rawconfig.Nearest(meta, interval, now), nil
+	}
+	logWorker(logger, "INFO", "rawconfig.update", "started", "自动更新直通配置")
+	result, updateErr := rawconfig.Update(ctx, rawconfig.Options{
+		URL:        module.RawConfigURL,
+		UserAgent:  module.RawConfigUA,
+		Timeout:    60 * time.Second,
+		Interval:   interval,
+		ConfigPath: paths.SingBoxRawConfig(options.SingBoxDir),
+		MetaPath:   metaPath,
+		Validate: rawconfig.SingBoxValidator(options.SingBoxPath, options.SingBoxDir,
+			paths.SingBoxServicesDoc(options.SingBoxDir)),
+		Now: now,
+	})
+	updated, _ := rawconfig.LoadMeta(metaPath)
+	if updateErr != nil {
+		logWorker(logger, "ERROR", "rawconfig.update", "failed", "直通配置更新失败: %v", updateErr)
+		return rawconfig.Nearest(updated, interval, now), updateErr
+	}
+	if result.NotModified {
+		logWorker(logger, "INFO", "rawconfig.update", "not-modified", "直通配置无变化")
+	} else {
+		logWorker(logger, "INFO", "rawconfig.update", "success", "直通配置已更新 (%d 字节)", result.Bytes)
+	}
+	return rawconfig.Nearest(updated, interval, now), nil
 }
 
 func applyUpdateEffects(ctx context.Context, options Options, result subscription.Result, groupID string, logger *log.Logger, forceReload bool) (string, bool, error) {

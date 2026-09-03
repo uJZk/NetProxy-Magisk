@@ -32,6 +32,8 @@ readonly DATA_DIR="$LIVE_DIR/data"
 readonly PRESERVE_CONFIGS="
     module.conf
     singbox/confdir
+    singbox/raw.json
+    singbox/raw.meta.json
     singbox/rules/local/direct.json
     singbox/rules/local/proxy.json
     singbox/rules/local/block.json
@@ -491,6 +493,8 @@ merge_live_state() {
   for config_item in \
     module.conf \
     singbox/confdir \
+    singbox/raw.json \
+    singbox/raw.meta.json \
     singbox/rules/local/direct.json \
     singbox/rules/local/proxy.json \
     singbox/rules/local/block.json; do

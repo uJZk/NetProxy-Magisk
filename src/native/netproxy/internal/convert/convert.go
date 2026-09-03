@@ -71,8 +71,8 @@ func Content(ctx context.Context, content string, allowInsecure bool) (provider.
 	ctx = provider.Context(ctx)
 
 	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
-		if outbounds, endpoints, err := providerparser.ParseBoxSubscription(ctx, trimmed); err == nil && len(outbounds)+len(endpoints) > 0 {
-			return finish(provider.Document{Outbounds: outbounds, Endpoints: endpoints}, nil, allowInsecure)
+		if result, handled, err := parseSingBox(ctx, trimmed, allowInsecure); handled {
+			return result, err
 		}
 		if outbounds, endpoints, err := providerparser.ParseSIP008Subscription(ctx, trimmed); err == nil && len(outbounds)+len(endpoints) > 0 {
 			return finish(provider.Document{Outbounds: outbounds, Endpoints: endpoints}, nil, allowInsecure)
