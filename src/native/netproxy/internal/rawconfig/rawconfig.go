@@ -31,7 +31,10 @@ const retryDelay = 15 * time.Minute
 // 用户设置（URL、周期、User-Agent）的事实源是 module.conf，这里只记录下载簿记，
 // 避免同一项设置出现两个可写副本。
 type Meta struct {
-	Schema          int    `json:"schema"`
+	Schema int `json:"schema"`
+	// URL 记录这批缓存校验值取自哪个地址，不是设置的事实源（那仍是 module.conf）。
+	// 换了地址还沿用旧的 ETag，服务端可能回 304，于是配置没换但用户以为换了。
+	URL             string `json:"url"`
 	ETag            string `json:"etag"`
 	LastModified    string `json:"last_modified"`
 	UpdatedAt       string `json:"updated_at"`
@@ -167,9 +170,10 @@ func Update(ctx context.Context, options Options) (Result, error) {
 		AllowInsecure: options.AllowInsecure,
 		Timeout:       options.Timeout,
 	}
-	// 只有本地已有可用配置时才发条件请求：否则 304 会让我们既没有新内容，
-	// 也没有旧内容可用。
-	if !options.Force && fileExists(options.ConfigPath) {
+	// 只有本地已有可用配置、且这批校验值确实取自同一个地址时才发条件请求：
+	// 没有本地配置时 304 会让我们既没有新内容也没有旧内容；换了地址时 304 会
+	// 让旧配置原地留下，看起来更新成功了。
+	if !options.Force && fileExists(options.ConfigPath) && meta.URL == options.URL {
 		request.ETag = meta.ETag
 		request.LastModified = meta.LastModified
 	}
@@ -209,6 +213,7 @@ func Update(ctx context.Context, options Options) (Result, error) {
 		return Result{}, options.fail(meta, now, err)
 	}
 
+	meta.URL = options.URL
 	meta.ETag = response.Metadata.ETag
 	meta.LastModified = response.Metadata.LastModified
 	meta.Bytes = int64(len(response.Body))

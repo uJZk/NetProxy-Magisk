@@ -239,3 +239,45 @@ func TestCheckDocumentAcceptsUserSuppliedEBPFInbound(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// 换地址后必须重新下载：沿用上一个地址的 ETag 会让服务端回 304，
+// 旧配置原地留下，用户以为已经切换。
+func TestUpdateRefetchesAfterURLChange(t *testing.T) {
+	const replacement = `{"inbounds":[{"type":"ebpf","tag":"ebpf-in"}],"outbounds":[{"type":"block","tag":"block"}]}`
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		// 无条件回 304，模拟只看 If-Modified-Since 的服务端。
+		if request.Header.Get("If-None-Match") != "" || request.Header.Get("If-Modified-Since") != "" {
+			writer.WriteHeader(http.StatusNotModified)
+			return
+		}
+		writer.Header().Set("ETag", `"shared"`)
+		if request.URL.Path == "/second.json" {
+			_, _ = writer.Write([]byte(replacement))
+			return
+		}
+		_, _ = writer.Write([]byte(sampleConfig))
+	}))
+	defer server.Close()
+
+	options := newOptions(t, server.URL+"/first.json")
+	if _, err := rawconfig.Update(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+
+	switched := options
+	switched.URL = server.URL + "/second.json"
+	result, err := rawconfig.Update(context.Background(), switched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.NotModified {
+		t.Fatal("switching the URL must not be short circuited by the previous ETag")
+	}
+	content, err := os.ReadFile(options.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != replacement {
+		t.Fatalf("configuration was not replaced after the URL changed: %s", content)
+	}
+}
