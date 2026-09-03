@@ -84,7 +84,7 @@ type PrepareResult struct {
 // ConfigArgs 返回本次启动实际交给 sing-box 的配置参数。
 func (result PrepareResult) ConfigArgs(singBoxDir string) []string {
 	if result.Raw {
-		return []string{"-c", result.RawConfig, "-c", result.RawServices}
+		return []string{"-c", result.RawConfig, "-c", result.EBPF, "-c", result.RawServices}
 	}
 	return []string{
 		"-C", paths.SingBoxConfDir(singBoxDir),
@@ -145,6 +145,8 @@ func Prepare(ctx context.Context, options Options, allowEmpty bool) (PrepareResu
 }
 
 // prepareRawConfig 校验直通模式所需的文件，并给出实际要加载的配置组合。
+// eBPF 入站仍由模块生成：模块在 Android 上的抓取手段就是它，用户配置删掉
+// tun 之后如果这里也不提供入站，核心会正常运行但一个连接都不会被代理。
 func prepareRawConfig(options Options) (PrepareResult, error) {
 	configPath := paths.SingBoxRawConfig(options.SingBoxDir)
 	if _, err := os.Stat(configPath); err != nil {
@@ -154,7 +156,19 @@ func prepareRawConfig(options Options) (PrepareResult, error) {
 	if _, err := os.Stat(servicesPath); err != nil {
 		return PrepareResult{}, fmt.Errorf("Service API 文档不可用: %w", err)
 	}
-	return PrepareResult{Raw: true, RawConfig: configPath, RawServices: servicesPath}, nil
+	ebpfPath := filepath.Join(options.RuntimeDir, "ebpf.json")
+	config, err := ebpf.Load(options.EBPFConfig)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	missingPackages, err := ebpf.WriteAtomic(ebpfPath, config)
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	for _, ref := range missingPackages {
+		logService(options, "WARN", "ebpf.package", "skipped", "分应用代理跳过未安装应用: %s", ref.String())
+	}
+	return PrepareResult{Raw: true, RawConfig: configPath, RawServices: servicesPath, EBPF: ebpfPath}, nil
 }
 
 func syncRuntimeSelection(path string, runtime catalog.RuntimeResult) error {
