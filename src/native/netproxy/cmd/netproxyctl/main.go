@@ -122,10 +122,22 @@ func defaultTimeoutFor(args []string) time.Duration {
 		// 每个订阅已经有自己的下载超时；外层默认时限会提前取消事务，丢失已持久化状态。
 		return 0
 	}
-	if len(args) > 1 && args[0] == "service" && args[1] == "start" {
+	// restart/reload/toggle 内部同样要停核心、生成配置、跑 sing-box check
+	// 并等待控制接口就绪，光等待就有 30 秒预算；沿用默认时限会在核心还在启动时
+	// 就报命令超时，让人误以为启动失败。
+	if len(args) > 1 && args[0] == "service" && isLongRunningServiceAction(args[1]) {
 		return serviceStartTimeout
 	}
 	return defaultCommandTimeout
+}
+
+func isLongRunningServiceAction(action string) bool {
+	switch action {
+	case "start", "restart", "reload", "toggle":
+		return true
+	default:
+		return false
+	}
 }
 
 func isSubscriptionMutation(args []string) bool {

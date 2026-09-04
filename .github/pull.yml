@@ -1,0 +1,16 @@
+# wei/pull：自动跟进上游 Fanju6/NetProxy-Magisk 的更新。
+#
+# mergeMethod 必须是 merge，不能用文档里最常见的 hardreset：
+# hardreset 会把本分支强制重置到上游，本仓库在 main 上的改动（直通配置、
+# 工作流调整、版本号与自更新地址）会被全部丢弃且无法从 PR 里找回。
+version: "1"
+rules:
+  - base: main
+    upstream: Fanju6:main
+    mergeMethod: merge
+    # 上游 PR 检查未通过或 mergeable_state 不干净时不自动合并。
+    mergeUnstable: false
+    conflictReviewers:
+      - uJZk
+label: "upstream-sync"
+conflictLabel: "merge-conflict"
