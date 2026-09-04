@@ -17,6 +17,21 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 mkdir -p "$TMP_DIR"
 
+# fork 补丁版本（四段）必须能提取，且不能和同前缀的三段版本互相串。
+node "$SCRIPT" "$CHANGELOG" "v8.1.1.1" "$TMP_DIR/8.1.1.1.md"
+grep -Fq '## 版本 8.1.1.1' "$TMP_DIR/8.1.1.1.md"
+if grep -Fq '## 版本 8.1.1（' "$TMP_DIR/8.1.1.1.md"; then
+  printf '%s\n' '8.1.1.1 的日志混入了 8.1.1' >&2
+  exit 1
+fi
+
+node "$SCRIPT" "$CHANGELOG" "v8.1.1" "$TMP_DIR/8.1.1.md"
+grep -Fq '## 版本 8.1.1（' "$TMP_DIR/8.1.1.md"
+if grep -Fq '## 版本 8.1.1.1' "$TMP_DIR/8.1.1.md"; then
+  printf '%s\n' '8.1.1 的日志错误匹配到了 8.1.1.1' >&2
+  exit 1
+fi
+
 node "$SCRIPT" "$CHANGELOG" "v8.0.0" "$TMP_DIR/8.0.0.md"
 grep -Fq '## 版本 8.0.0' "$TMP_DIR/8.0.0.md"
 if grep -Fq '## 版本 7.2.0' "$TMP_DIR/8.0.0.md"; then

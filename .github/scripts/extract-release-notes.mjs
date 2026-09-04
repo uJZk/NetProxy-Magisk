@@ -1,6 +1,8 @@
 import { readFile, writeFile } from "node:fs/promises"
 
-const versionPattern = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?`
+// 第四段用于 fork 的补丁版本（如 8.1.1.1）：上游三段版本加一位，
+// 表示同一上游版本之上的第 N 次本仓库发布。
+const versionPattern = String.raw`\d+\.\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?`
 const releaseHeadingPatterns = [
   new RegExp(`^##\\s+版本\\s*v?(${versionPattern})(?=\\s|[（(]|$)`, "u"),
   new RegExp(`^##\\s+v(${versionPattern})(?=\\s|[（(]|$)`, "u"),
