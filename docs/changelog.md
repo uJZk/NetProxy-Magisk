@@ -2,9 +2,9 @@
 
 本页收录 GitHub Releases 中发布的正式版本，按发布时间倒序排列；不包含持续更新的 `nightly Pre-release`。
 
-## 版本 8.2.0（2026-09-03）
+## 版本 8.2.1（2026-09-04）
 
-8.2 支持直接使用 sing-box 完整配置：既可以从中导入节点，也可以让模块按周期下载并直接运行整份配置。
+8.2.1 支持直接使用 sing-box 完整配置：既可以从中导入节点，也可以让模块按周期下载并直接运行整份配置。
 
 ### 导入完整配置
 
@@ -26,6 +26,7 @@
 - `module.conf` 新增 `CONFIG_MODE`、`RAW_CONFIG_URL`、`RAW_CONFIG_USER_AGENT` 与 `RAW_CONFIG_INTERVAL`，默认 `managed`，既有行为不变。
 - 直通配置保存在 `config/singbox/raw.json`，已加入安装脚本的保留清单，模块更新不会清掉它。
 - 直通模式下用户配置不能占用 `127.0.0.1:9090`，该端口由模块的 Service API 使用；冲突会在 `config raw update` 的检查阶段失败并保留旧配置。
+- 模块自更新地址改为本仓库的 Release，此前指向上游仓库，会导致模块内检查不到本仓库发布的版本。
 
 * * *
 
