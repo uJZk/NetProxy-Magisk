@@ -128,6 +128,9 @@ func defaultTimeoutFor(args []string) time.Duration {
 	if len(args) > 1 && args[0] == "service" && isLongRunningServiceAction(args[1]) {
 		return serviceStartTimeout
 	}
+	if len(args) > 1 && args[0] == "config" && isLongRunningConfigAction(args[1:]) {
+		return serviceStartTimeout
+	}
 	return defaultCommandTimeout
 }
 
@@ -135,6 +138,25 @@ func isLongRunningServiceAction(action string) bool {
 	switch action {
 	case "start", "restart", "reload", "toggle":
 		return true
+	default:
+		return false
+	}
+}
+
+// isLongRunningConfigAction 标出会跑 sing-box check 或触发核心 reload 的配置操作。
+// config apply 在核心运行时会完整重载一次（生成配置 -> check -> 重启 -> 等待就绪），
+// 用户配置里的远程 rule-set 还要重新下载，轻易超过默认时限；超时会让调用方
+// （包括 Android 管理器的设置开关）把一次仍在进行的操作误报为失败。
+func isLongRunningConfigAction(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "apply", "validate", "check":
+		return true
+	case "raw":
+		// raw update 要先下载再交给 sing-box 校验。
+		return len(args) > 1 && args[1] == "update"
 	default:
 		return false
 	}

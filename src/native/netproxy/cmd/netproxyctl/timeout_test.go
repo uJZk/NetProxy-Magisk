@@ -28,3 +28,31 @@ func TestSubscriptionMutationsHaveNoOuterDeadline(t *testing.T) {
 		t.Fatalf("sub update 超时 = %v，应为 0", got)
 	}
 }
+
+// config apply 在核心运行时会触发完整 reload，Android 管理器的设置开关走的正是这条路径。
+func TestConfigMutationsGetLongBudget(t *testing.T) {
+	cases := [][]string{
+		{"config", "apply", "module", "/tmp/x"},
+		{"config", "validate", "module", "/tmp/x"},
+		{"config", "check"},
+		{"config", "raw", "update"},
+	}
+	for _, args := range cases {
+		if got := defaultTimeoutFor(args); got != serviceStartTimeout {
+			t.Fatalf("%v 超时 = %v，应为 %v", args, got, serviceStartTimeout)
+		}
+	}
+}
+
+func TestConfigReadsKeepDefaultBudget(t *testing.T) {
+	cases := [][]string{
+		{"config", "list"},
+		{"config", "read", "module"},
+		{"config", "raw", "show"},
+	}
+	for _, args := range cases {
+		if got := defaultTimeoutFor(args); got != defaultCommandTimeout {
+			t.Fatalf("%v 超时 = %v，应为 %v", args, got, defaultCommandTimeout)
+		}
+	}
+}
