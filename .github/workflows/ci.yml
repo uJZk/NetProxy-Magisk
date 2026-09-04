@@ -134,36 +134,40 @@ jobs:
             "${{ steps.pack.outputs.standard_name }}" \
             "${{ steps.pack.outputs.manager_name }}"
 
-      - name: Telegram 构建成功通知
-        if: success()
-        uses: cbrgm/telegram-github-action@v1
-        with:
-          token: ${{ secrets.TG_BOT_TOKEN }}
-          to: ${{ secrets.TG_CHAT_ID }}
-          thread-id: 2275
-          parse-mode: markdown
-          message: |
-            **持续集成构建成功**
+      # Telegram 通知：本仓库未配置 TG_BOT_TOKEN / TG_CHAT_ID，
+      # 启用会让整个 run 在此步骤失败。补上 secrets 后取消注释即可。
+#       - name: Telegram 构建成功通知
+#         if: success()
+#         uses: cbrgm/telegram-github-action@v1
+#         with:
+#           token: ${{ secrets.TG_BOT_TOKEN }}
+#           to: ${{ secrets.TG_CHAT_ID }}
+#           thread-id: 2275
+#           parse-mode: markdown
+#           message: |
+#             **持续集成构建成功**
+#
+#             版本: `${{ steps.pack.outputs.version }}` (build ${{ steps.pack.outputs.commit_count }})
+#             说明: ${{ env.COMMIT_MESSAGE }}
+#
+#             [下载开发包](${{ github.server_url }}/${{ github.repository }}/releases/tag/nightly)
+#             [提交记录](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+#             [构建日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-            版本: `${{ steps.pack.outputs.version }}` (build ${{ steps.pack.outputs.commit_count }})
-            说明: ${{ env.COMMIT_MESSAGE }}
-
-            [下载开发包](${{ github.server_url }}/${{ github.repository }}/releases/tag/nightly)
-            [提交记录](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
-            [构建日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-      - name: 失败通知
-        if: failure()
-        uses: cbrgm/telegram-github-action@v1
-        with:
-          token: ${{ secrets.TG_BOT_TOKEN }}
-          to: ${{ secrets.TG_CHAT_ID }}
-          thread-id: 2275
-          parse-mode: markdown
-          message: |
-            **持续集成失败！**
-
-            提交: `${{ github.sha }}`
-            说明: ${{ env.COMMIT_MESSAGE }}
-
-            [点击查看构建日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+      # Telegram 通知：本仓库未配置 TG_BOT_TOKEN / TG_CHAT_ID，
+      # 启用会让整个 run 在此步骤失败。补上 secrets 后取消注释即可。
+#       - name: 失败通知
+#         if: failure()
+#         uses: cbrgm/telegram-github-action@v1
+#         with:
+#           token: ${{ secrets.TG_BOT_TOKEN }}
+#           to: ${{ secrets.TG_CHAT_ID }}
+#           thread-id: 2275
+#           parse-mode: markdown
+#           message: |
+#             **持续集成失败！**
+#
+#             提交: `${{ github.sha }}`
+#             说明: ${{ env.COMMIT_MESSAGE }}
+#
+#             [点击查看构建日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
