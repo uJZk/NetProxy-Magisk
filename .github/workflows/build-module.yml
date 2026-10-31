@@ -7,15 +7,6 @@ on:
         description: 是否同时执行 Android 单元测试与 Lint
         type: boolean
         default: false
-    secrets:
-      ANDROID_KEYSTORE_BASE64:
-        required: true
-      ANDROID_KEYSTORE_PASSWORD:
-        required: true
-      ANDROID_KEY_ALIAS:
-        required: true
-      ANDROID_KEY_PASSWORD:
-        required: true
     outputs:
       version:
         value: ${{ jobs.module.outputs.version }}
@@ -46,9 +37,6 @@ jobs:
       - name: 构建并压缩模块内容
         id: pack
         uses: ./.github/actions/build-module
-        with:
-          posthog-project-token: ${{ vars.POSTHOG_PROJECT_TOKEN }}
-          posthog-host: ${{ vars.POSTHOG_HOST }}
 
       - name: 保存已验证的模块内容
         uses: actions/upload-artifact@v7
@@ -76,23 +64,18 @@ jobs:
             .github/actions/verify-android
             .github/scripts
 
-      - name: 构建并签名管理器，按需执行验证
+      - name: 构建平台辅助程序，按需执行 Android 验证
         uses: ./.github/actions/verify-android
         with:
-          build-manager: 'true'
+          build-manager: 'false'
+          build-platform: 'true'
           verify: ${{ inputs.verify-android }}
-          signing-keystore-base64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          signing-store-password: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          signing-key-alias: ${{ secrets.ANDROID_KEY_ALIAS }}
-          signing-key-password: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
-      - name: 保存本次签名的管理器
+      - name: 保存平台辅助程序
         uses: actions/upload-artifact@v7
         with:
-          name: manager-binaries
-          path: |
-            src/module/NetProxy.apk
-            src/android/platform/build/dex/classes.dex
+          name: platform-binary
+          path: src/android/platform/build/dex/classes.dex
           if-no-files-found: error
           compression-level: 0
           retention-days: 3
@@ -116,14 +99,14 @@ jobs:
         with:
           name: module-content
 
-      - name: 下载本次签名管理器
+      - name: 下载平台辅助程序
         uses: actions/download-artifact@v8
         with:
-          name: manager-binaries
-          path: manager
+          name: platform-binary
+          path: platform
 
       - name: 完成唯一模块包
-        run: sh .github/scripts/complete-module.sh "$MODULE_NAME" manager/module/NetProxy.apk manager/android/platform/build/dex/classes.dex
+        run: sh .github/scripts/complete-module.sh "$MODULE_NAME" platform/classes.dex
 
       - name: 保存最终模块包
         uses: actions/upload-artifact@v7

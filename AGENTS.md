@@ -127,7 +127,7 @@ src/module/service.sh
 - 默认 DNS 引用本地规则集时使用原生 `evaluate` / `match_response`，不能直接按旧式地址过滤引用；否则添加有效 IP 规则会触发内核弃用检查并使正在重载的核心退出。不得使用 `ENABLE_DEPRECATED_*` 绕过。
 - 路由规则合并列表必须以规则集和文件内索引共同定位条目；添加时选择目标规则集，编辑与删除已有规则不得因其他规则集存在相同索引而写错文件。合并展示不改变主配置中的规则匹配顺序。
 - `third_party/scripta` 是带来源记录的固定源码快照。修改其代码时保留来源、许可证和 NetProxy 扩展说明，不把它悄悄替换成浮动远程依赖。
-- 模块包必须包含 `NetProxy.apk`，由独立 Android 任务通过共享 Action 从当前源码构建，并使用 GitHub Secrets 中的固定密钥签名；不得提交签名材料或手工维护该生成物。安装器不检查已安装版本，两处安装选择共用音量加循环、音量减确认；10 秒无操作默认执行 `pm install -r`，操作后 20 秒未确认取消安装；APK 安装失败不卸载应用或清除数据，也不阻塞模块安装。
+- 本仓库模块包不附带管理器 APK；Android 平台辅助 DEX 仍是安装与运行所需文件。安装器遇到未附带 APK 时直接跳过管理器安装。
 
 ## WebUI
 
@@ -440,15 +440,15 @@ Go 生命周期控制器通过 `-c config/singbox/config.json` 加载静态配�
 
 ## 构建与发布
 
-- CI 与 Release 共用 `build-module.yml` 的并行任务图；模块任务完成 Go/Shell 验证、`netproxyctl`、WebUI 与内容压缩，Android 任务构建当前源码的 APK 与框架辅助 DEX，并用固定密钥签名 APK；打包同时校验辅助程序固定的公开证书指纹。共享工作流等待两者成功后汇合为唯一模块包，发布任务只下载最终产物，不重新编译或打包。Android 源码变化必须触发模块重打包；任一构建或所需验证失败均不得发布。
+- CI 与 Release 共用 `build-module.yml`；模块任务验证并打包模块，Android 任务构建平台辅助 DEX，汇合后发布唯一模块包。失败时不得发布。
 - `verify.yml` 面向 Pull Request 与手动源码验证，只读取公开源码并按变更范围执行 Native、WebUI、Android 或文档检查；它不得读取签名、发布、Telegram 或统计 Secrets，不得打包、上传或发布产物。只有 `main` 上的 `ci.yml` 和 tag 发布工作流可以构建签名管理器与模块包。
 - CI 变更范围从同分支上次成功验证的提交计算，不能只比较本次 push：前一轮被取消或失败的改动仍须验证；基线不可用时执行全部检查。
 - 版本计数与更新日志所需的 checkout 保留完整提交历史；可使用 `blob:none` 或稀疏检出减少历史文件下载。
-- 主仓库只发布 `NetProxy_<版本>_<构建号>.zip`，必须包含本次构建的管理器 APK。APK 只在首次解压检查时必需，用户安装或跳过后均清理，热切换校验不得要求它仍然存在。
-- 模块使用 ZIP 容器和 XZ 9 压缩，根目录唯一的 `module.prop` 必须使用 Store，供 KernelSU 索引读取；汇合任务以 Store 追加 APK 与 `bin/android-platform.dex`，不复制第二份发行包。CI 上传归档时不再进行外层压缩。
+- 本仓库发布 `NetProxy_<版本>_<构建号>.zip`，不附带管理器 APK。
+- 模块使用 ZIP 容器和 XZ 9 压缩，根目录唯一的 `module.prop` 必须使用 Store；汇合任务以 Store 追加 `bin/android-platform.dex`。
 - KernelSU 仅从公开 `Fanju6/NetProxy-Releases` 分发不可变正式版本，源码和可变 nightly 留在主仓库；不镜像源码、全部标签或历史 Release。根目录 `module.yaml` 与 `.github/kernelsu/` 是展示元数据，不是设备上的 `config/module.json`。正式发布先经过官方 Action 预检，主仓库发布后分发同一 ZIP；分发资源按官方规则命名 `netproxy-<构建号>-<版本>.zip`，摘要必须一致。
 - `publish-kernelsu.yml` 重试只下载既有主仓库正式 Release，不重新构建。已发布的分发版本只能验证不可变状态和摘要，不能覆盖、删除或移动 tag；分发失败不能冒充主仓库发布失败。`DIST_REPO_TOKEN` 仅有分发仓库 Contents 读写和 Administration 只读权限，资源更新使用仅限主仓库的 `RESOURCE_UPDATE_TOKEN`，两者不能互用。
-- Android 受影响时，CI 在管理器构建任务中使用同一次 Gradle 调用执行单元测试、Lint 与 Release 构建；仅需模块打包时仍构建当前管理器，不额外执行 Android 验证。资源维护复用纯验证模式，不构建 APK，也不需要签名密钥。固定签名由 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD` 四个 GitHub Secrets 注入；缺失时构建失败，不生成替代密钥。CI 版本名保留提交短哈希，仅用于区分构建。
+- Android 受影响时，CI 验证 Android 并构建平台辅助 DEX；模块发布不需要管理器签名 Secrets 或 PostHog 配置。
 - Release 只能从与 `src/module/module.prop` 的 `version=` 和 `docs/changelog.md` 对应章节完全一致的 `v<版本号>` tag 启动；预检失败时不得开始签名构建或创建 Release。
 - `update-resources.yml` 统一维护内核、规则、Web 资源、Go/npm/Gradle/Android 依赖；规则与 Web 资源属于内容更新，sing-box 属于核心更新，工具链大版本进入报告。GitHub Actions 更新只报告、不由定时任务静默改写。
 - Composite Action 的仓库 Variables 由调用工作流通过 inputs 显式传入；在 Action 清单中直接读取 `vars` 会导致 Runner 加载失败，尚未开始构建就退出。

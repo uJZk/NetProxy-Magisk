@@ -501,8 +501,8 @@ install_bundled_manager() {
   local install_output
   print_title "安装 NetProxy 管理器"
   if [ ! -s "$MODPATH/NetProxy.apk" ]; then
-    print_error "安装包缺少 NetProxy 管理器 APK"
-    return 1
+    print_step "安装包未包含管理器，跳过安装"
+    return 0
   fi
   choose_volume_option 10 "安装或更新管理器" "跳过管理器安装" || return 1
   if [ "$VOLUME_CHOICE" -eq 2 ]; then
@@ -555,7 +555,7 @@ choose_install_mode || exit 1
 print_title "准备安装"
 print_step "解压与校验安装包..."
 unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH" >/dev/null 2>&1 \
-  && [ -s "$MODPATH/NetProxy.apk" ] && validate_stage && set_permissions \
+  && validate_stage && set_permissions \
   || { print_error "安装包或权限检查失败"; exit 1; }
 install_bundled_manager || { print_error "管理器安装步骤失败"; exit 1; }
 print_title "安装模块"

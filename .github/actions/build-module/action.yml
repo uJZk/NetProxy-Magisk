@@ -1,14 +1,6 @@
 name: 构建模块内容
 description: 验证并构建原生组件与 WebUI，生成等待追加管理器的 XZ 模块内容
 
-inputs:
-  posthog-project-token:
-    description: 用于构建注入的 PostHog Project Token
-    required: true
-  posthog-host:
-    description: 用于构建注入的 PostHog ingestion host
-    required: true
-
 # 被 ci.yml 与 release.yml 复用的共享打包逻辑（调用前需已 checkout，且 fetch-depth: 0 以便统计提交数）
 outputs:
   version:
@@ -52,9 +44,6 @@ runs:
       shell: bash
       env:
         NETPROXY_CI_BUILD_DIR: ${{ runner.temp }}/netproxy-build
-        NETPROXY_TELEMETRY_REQUIRED: '1'
-        POSTHOG_PROJECT_TOKEN: ${{ inputs.posthog-project-token }}
-        POSTHOG_HOST: ${{ inputs.posthog-host }}
       run: |
         set -euo pipefail
         sh tests/ci_verify.sh

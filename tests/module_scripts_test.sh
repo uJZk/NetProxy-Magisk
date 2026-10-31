@@ -119,7 +119,7 @@ check_install_choices() {
   grep -q '仅保留节点与订阅' "$MODULE_DIR/customize.sh"
   grep -q 'install_bundled_manager' "$MODULE_DIR/customize.sh"
   grep -q 'print_title "安装 NetProxy 管理器"' "$MODULE_DIR/customize.sh"
-  grep -q '\[ -s "\$MODPATH/NetProxy.apk" \]' "$MODULE_DIR/customize.sh"
+  grep -q '\[ ! -s "\$MODPATH/NetProxy.apk" \]' "$MODULE_DIR/customize.sh"
   grep -q 'pm install -r "\$MODPATH/NetProxy.apk"' "$MODULE_DIR/customize.sh"
   grep -q '10 秒未操作，默认选择' "$MODULE_DIR/customize.sh"
   grep -q 'choose_volume_option 10 "安装或更新管理器" "跳过管理器安装"' "$MODULE_DIR/customize.sh"

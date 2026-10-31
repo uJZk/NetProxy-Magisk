@@ -377,12 +377,11 @@ test_manager_install() (
   }
   dumpsys() { printf 'unexpected dumpsys call\n' >> "$CALL_LOG"; return 1; }
   wait_volume_key() { next_test_key "$@"; }
-  if install_bundled_manager > "$WORKDIR/manager"; then exit 1; fi
-  grep -Fq '安装 NetProxy 管理器' "$WORKDIR/manager"
-  grep -Fq '缺少' "$WORKDIR/manager"
+  install_bundled_manager > "$WORKDIR/manager"
+  grep -Fq '跳过安装' "$WORKDIR/manager"
   [ ! -s "$CALL_LOG" ]
   : > "$STAGE/NetProxy.apk"
-  if install_bundled_manager > "$WORKDIR/manager"; then exit 1; fi
+  install_bundled_manager > "$WORKDIR/manager"
   for pair in 'down:install' 'timeout:install' 'up down:skip' 'up up down:install'; do
     CHOICES="${pair%:*}"
     : > "$CALL_LOG"

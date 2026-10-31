@@ -5,6 +5,9 @@ inputs:
   build-manager:
     description: 是否构建并签名当前源码的 CI 管理器
     default: 'false'
+  build-platform:
+    description: 是否构建平台辅助程序
+    default: 'false'
   verify:
     description: 是否执行 Android 单元测试与 Lint
     default: 'true'
@@ -62,6 +65,7 @@ runs:
       working-directory: src/android
       env:
         BUILD_MANAGER: ${{ inputs.build-manager }}
+        BUILD_PLATFORM: ${{ inputs.build-platform }}
         VERIFY_ANDROID: ${{ inputs.verify }}
         ASSEMBLE_DEBUG: ${{ inputs.assemble-debug }}
         MANAGER_VERSION: ${{ steps.meta.outputs.manager_version }}
@@ -73,6 +77,9 @@ runs:
             -PnetproxyManagerCi=true \
             -PnetproxyManagerBuildId="$BUILD_ID" \
             -PnetproxyManagerVersion="$MANAGER_VERSION"
+        fi
+        if [ "$BUILD_PLATFORM" = true ] && [ "$VERIFY_ANDROID" != true ] && [ "$BUILD_MANAGER" != true ]; then
+          set -- "$@" :platform:assembleDex
         fi
         if [ "$VERIFY_ANDROID" = true ]; then
           set -- "$@" testDebugUnitTest :scripta:editor:testAndroidHostTest :scripta:editor:desktopTest lintDebug :platform:assembleDex

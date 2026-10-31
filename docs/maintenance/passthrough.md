@@ -8,4 +8,4 @@
 
 2026-10-31 执行 `tests/verify.sh quick` 通过，覆盖 Go 测试、Android arm64 CLI 构建、Shell 和发布契约；完整配置的真实设备网络行为仍需在 Android 真机验证。后续修改应继续验证真实配置和升级时的数据保留。
 
-`v8.6.2` 标签的首次 Release 工作流因仓库缺少 Android 固定签名 Secrets 和 `POSTHOG_PROJECT_TOKEN` 变量而失败，未创建 Release。配置好现有签名密钥的 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD` 及项目变量后，可重试该标签的失败任务；不要改用新的签名密钥。真机验证仍未进行。
+`v8.6.2` 的发布因缺少管理器签名密钥和 PostHog 配置而失败。后续模块包不附带管理器 APK，不注入 PostHog 配置，保留 Android 平台辅助程序；采用新版本标签发布，避免修改已有标签。真机验证仍未进行。
