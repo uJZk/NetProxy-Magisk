@@ -46,6 +46,8 @@ type UpdateOptions struct {
 	UseConfiguredProxy bool
 	FallbackDirect     bool
 	RuntimeSyncPending bool
+	// TransferContext 仅取消网络下载；转换、提交和持久化收尾仍使用调用方上下文。
+	TransferContext context.Context
 	// PersistedBeforeUpdate 表示调用方已先保存编辑设置；更新失败时仍须在错误数据中报告已保存。
 	PersistedBeforeUpdate bool
 	Now                   time.Time
@@ -98,12 +100,11 @@ func MarkPersistedError(err error) error {
 
 // RecordRuntimeSyncFailure 记录运行时应用失败，并保留 HTTP 更新成功时间。
 func RecordRuntimeSyncFailure(ctx context.Context, root, groupID string, cause error, now time.Time) error {
-	_ = ctx
 	message := RuntimeSyncFailureMessage
 	if cause != nil {
 		message += ": " + cause.Error()
 	}
-	return updateRuntimeMetadata(root, groupID, true, message, RuntimeSyncFailed, map[string]any{
+	return updateRuntimeMetadata(ctx, root, groupID, true, message, RuntimeSyncFailed, map[string]any{
 		"at": formatTime(now), "ok": false, "code": "subscription.runtime_sync_failed",
 		"message": RuntimeSyncFailureMessage, "cause": errorString(cause),
 	}, now)
@@ -111,7 +112,6 @@ func RecordRuntimeSyncFailure(ctx context.Context, root, groupID string, cause e
 
 // RecordPersistedEffectFailure 记录本地状态副作用失败，并保留 HTTP 更新成功时间。
 func RecordPersistedEffectFailure(ctx context.Context, root, groupID string, pending bool, cause error, now time.Time) error {
-	_ = ctx
 	message := PersistedEffectFailureMessage
 	if cause != nil {
 		message += ": " + cause.Error()
@@ -120,7 +120,7 @@ func RecordPersistedEffectFailure(ctx context.Context, root, groupID string, pen
 	if pending {
 		state = RuntimeSyncFailed
 	}
-	return updateRuntimeMetadata(root, groupID, pending, message, state, map[string]any{
+	return updateRuntimeMetadata(ctx, root, groupID, pending, message, state, map[string]any{
 		"at": formatTime(now), "ok": false, "code": "subscription.persisted_effect_failed",
 		"message": PersistedEffectFailureMessage, "cause": errorString(cause),
 	}, now)
@@ -128,22 +128,20 @@ func RecordPersistedEffectFailure(ctx context.Context, root, groupID string, pen
 
 // RecordRuntimeSyncSuccess 清理运行时失败状态；仅在此前确有运行时失败时追加成功历史。
 func RecordRuntimeSyncSuccess(ctx context.Context, root, groupID string, now time.Time) error {
-	_ = ctx
-	return updateRuntimeMetadata(root, groupID, false, "", RuntimeSyncApplied, nil, now)
+	return updateRuntimeMetadata(ctx, root, groupID, false, "", RuntimeSyncApplied, nil, now)
 }
 
 // RecordRuntimeSyncNotRunning 记录服务未运行时已确认的持久化状态，并保留未完成的运行时同步错误。
 func RecordRuntimeSyncNotRunning(ctx context.Context, root, groupID string, now time.Time) error {
-	_ = ctx
 	if strings.TrimSpace(root) == "" || !validGroupID(groupID) {
 		return errors.New("订阅目录或分组无效")
 	}
-	releaseGroup, err := catalog.Acquire(root, groupID)
+	releaseGroup, err := catalog.Acquire(ctx, root, groupID)
 	if err != nil {
 		return err
 	}
 	defer releaseGroup()
-	releaseRoot, err := catalog.AcquireRoot(root)
+	releaseRoot, err := catalog.AcquireRoot(ctx, root)
 	if err != nil {
 		return err
 	}
@@ -166,16 +164,16 @@ func RecordRuntimeSyncNotRunning(ctx context.Context, root, groupID string, now 
 	return catalog.SaveMetadataAtomicLocked(metaPath, metadata)
 }
 
-func updateRuntimeMetadata(root, groupID string, pending bool, lastError, state string, history map[string]any, now time.Time) error {
+func updateRuntimeMetadata(ctx context.Context, root, groupID string, pending bool, lastError, state string, history map[string]any, now time.Time) error {
 	if strings.TrimSpace(root) == "" || !validGroupID(groupID) {
 		return errors.New("订阅目录或分组无效")
 	}
-	releaseGroup, err := catalog.Acquire(root, groupID)
+	releaseGroup, err := catalog.Acquire(ctx, root, groupID)
 	if err != nil {
 		return err
 	}
 	defer releaseGroup()
-	releaseRoot, err := catalog.AcquireRoot(root)
+	releaseRoot, err := catalog.AcquireRoot(ctx, root)
 	if err != nil {
 		return err
 	}
@@ -273,12 +271,12 @@ func Update(ctx context.Context, options UpdateOptions) (Result, error) {
 	if options.Now.IsZero() {
 		options.Now = time.Now()
 	}
-	releaseGroup, err := catalog.Acquire(options.Root, options.GroupID)
+	releaseGroup, err := catalog.Acquire(ctx, options.Root, options.GroupID)
 	if err != nil {
 		return Result{}, &Error{Code: "subscription.busy", Message: "订阅或 Catalog 正在被其他进程使用", Data: err.Error()}
 	}
 	defer releaseGroup()
-	releaseRoot, err := catalog.AcquireRoot(options.Root)
+	releaseRoot, err := catalog.AcquireRoot(ctx, options.Root)
 	if err != nil {
 		return Result{}, &Error{Code: "subscription.busy", Message: "订阅或 Catalog 正在被其他进程使用", Data: err.Error()}
 	}
@@ -300,6 +298,9 @@ func Update(ctx context.Context, options UpdateOptions) (Result, error) {
 	}
 	if metadata.Type != "subscription" || strings.TrimSpace(metadata.URL) == "" {
 		return Result{}, &Error{Code: "subscription.invalid_target", Message: "目标不是有效的 URL 订阅"}
+	}
+	if err := ValidateSettings(metadata.UpdateInterval, metadata.UpdateViaProxy, metadata.Timeout); err != nil {
+		return Result{}, err
 	}
 	if options.UseConfiguredProxy && options.ProxyURL == "" {
 		switch metadata.UpdateViaProxy {
@@ -360,65 +361,66 @@ func Update(ctx context.Context, options UpdateOptions) (Result, error) {
 
 	started := options.Now
 	if err := writeProgress(options.ProgressDir, options.GroupID, "download", "正在下载订阅"); err != nil {
-		return updateFailure(options, metadata, groupDir, started, fetch.Response{}, "subscription.progress_write_failed", "订阅状态写入失败", err)
+		return updateFailure(ctx, options, metadata, groupDir, started, fetch.Response{}, "subscription.progress_write_failed", "订阅状态写入失败", err)
 	}
 	response, usedProxy, fetchErr := fetchSubscription(ctx, metadata, options)
 	if fetchErr != nil {
-		if cancelled(ctx, options.ProgressDir, options.GroupID) {
-			return updateFailure(options, metadata, groupDir, started, response, "subscription.cancelled", "订阅更新已取消", fetchErr)
+		if errors.Is(fetchErr, context.Canceled) || cancelled(ctx, options.ProgressDir, options.GroupID) {
+			return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.cancelled", "订阅更新已取消", fetchErr)
 		}
 		if _, ok := errors.AsType[*fetch.RedirectError](fetchErr); ok {
-			return updateFailure(options, metadata, groupDir, started, response, "subscription.redirect_rejected", "订阅重定向被拒绝", fetchErr)
+			return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.redirect_rejected", "订阅重定向被拒绝", fetchErr)
 		}
 		if progressErr, ok := errors.AsType[*progressWriteError](fetchErr); ok {
-			return updateFailure(options, metadata, groupDir, started, response, "subscription.progress_write_failed", "订阅状态写入失败", progressErr)
+			return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.progress_write_failed", "订阅状态写入失败", progressErr)
 		}
-		return updateFailure(options, metadata, groupDir, started, response, "subscription.convert_failed", "订阅下载或转换失败", fetchErr)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.convert_failed", "订阅下载或转换失败", fetchErr)
 	}
-	metadata = applyResponseMetadata(metadata, response.Metadata, options.Now)
+	metadata = applyResponseMetadata(metadata, response.Metadata)
 	metadata.Name = resolveName(metadata)
 
 	if response.Metadata.NotModified {
-		return commitNotModified(options, groupDir, metaPath, initialSnapshot, response, usedProxy)
+		return commitNotModified(ctx, options, groupDir, metaPath, initialSnapshot, response, usedProxy)
 	}
 
 	if err := writeProgress(options.ProgressDir, options.GroupID, "convert", "正在转换订阅节点"); err != nil {
-		return updateFailure(options, metadata, groupDir, started, response, "subscription.progress_write_failed", "订阅状态写入失败", err)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.progress_write_failed", "订阅状态写入失败", err)
 	}
 	parsed, parseErr := convert.Content(ctx, string(response.Body), metadata.AllowInsecure)
 	metadata.LastDiagnostics = append(response.Metadata.Diagnostics, parsed.Diagnostics...)
 	if parseErr != nil {
 		if cancelled(ctx, options.ProgressDir, options.GroupID) {
-			return updateFailure(options, metadata, groupDir, started, response, "subscription.cancelled", "订阅更新已取消", parseErr)
+			return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.cancelled", "订阅更新已取消", parseErr)
 		}
-		return updateFailure(options, metadata, groupDir, started, response, "subscription.convert_failed", "订阅下载、转换或校验失败", parseErr)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.convert_failed", "订阅下载、转换或校验失败", parseErr)
 	}
 	filtered, filterErr := provider.Filter(parsed.Document, metadata.Include, metadata.Exclude)
 	if filterErr != nil || len(filtered.Outbounds)+len(filtered.Endpoints) == 0 {
 		if filterErr == nil {
 			filterErr = errors.New("订阅中没有可用节点")
 		}
-		return updateFailure(options, metadata, groupDir, started, response, "provider.empty", "订阅中没有可用节点", filterErr)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "provider.empty", "订阅中没有可用节点", filterErr)
 	}
 
 	if err := writeProgress(options.ProgressDir, options.GroupID, "validate", "正在校验节点配置"); err != nil {
-		return updateFailure(options, metadata, groupDir, started, response, "subscription.progress_write_failed", "订阅状态写入失败", err)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.progress_write_failed", "订阅状态写入失败", err)
 	}
 	stageProvider := filepath.Join(stageDir, "provider.json")
 	if err := provider.SaveAtomic(ctx, stageProvider, filtered); err != nil {
-		return updateFailure(options, metadata, groupDir, started, response, "provider.invalid", "节点配置校验失败", err)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "provider.invalid", "节点配置校验失败", err)
 	}
 	if cancelled(ctx, options.ProgressDir, options.GroupID) {
-		return updateFailure(options, metadata, groupDir, started, response, "subscription.cancelled", "订阅更新已取消", errors.New("subscription update cancelled"))
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.cancelled", "订阅更新已取消", errors.New("subscription update cancelled"))
 	}
 	oldDocument, oldErr := provider.LoadAllowEmpty(ctx, providerPath)
 	if oldErr != nil && !os.IsNotExist(oldErr) {
-		return updateFailure(options, metadata, groupDir, started, response, "provider.read_failed", "读取旧节点配置失败", oldErr)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "provider.read_failed", "读取旧节点配置失败", oldErr)
 	}
 	oldHasNodes := len(oldDocument.Outbounds)+len(oldDocument.Endpoints) > 0
 	newNodeCount := len(filtered.Outbounds) + len(filtered.Endpoints)
 
 	metadata.NodeCount = newNodeCount
+	metadata.ETag, metadata.LastModified = response.Metadata.ETag, response.Metadata.LastModified
 	metadata.Revision++
 	metadata.LastAttemptAt = formatTime(options.Now)
 	metadata.LastSuccessAt = metadata.LastAttemptAt
@@ -433,18 +435,18 @@ func Update(ctx context.Context, options UpdateOptions) (Result, error) {
 	metadata.UpdatedAt = metadata.LastAttemptAt
 	metadataPath := filepath.Join(stageDir, "meta.json")
 	if err := catalog.SaveMetadataAtomicLocked(metadataPath, metadata); err != nil {
-		return updateFailure(options, metadata, groupDir, started, response, "metadata.write_failed", "订阅元数据写入失败", err)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "metadata.write_failed", "订阅元数据写入失败", err)
 	}
 
 	if err := writeProgress(options.ProgressDir, options.GroupID, "apply", "正在应用订阅更新"); err != nil {
-		return updateFailure(options, metadata, groupDir, started, response, "subscription.progress_write_failed", "订阅状态写入失败", err)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.progress_write_failed", "订阅状态写入失败", err)
 	}
 	providerContent, err := os.ReadFile(stageProvider)
 	if err != nil {
-		return updateFailure(options, metadata, groupDir, started, response, "provider.read_failed", "读取临时节点配置失败", err)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "provider.read_failed", "读取临时节点配置失败", err)
 	}
 	var commitReleaseRoot func()
-	commitReleaseRoot, err = catalog.AcquireRoot(options.Root)
+	commitReleaseRoot, err = catalog.AcquireRoot(ctx, options.Root)
 	if err != nil {
 		clearProgress(options.ProgressDir, options.GroupID)
 		return Result{}, &Error{Code: "subscription.busy", Message: "订阅或 Catalog 正在被其他进程使用", Data: err.Error()}
@@ -474,16 +476,16 @@ func Update(ctx context.Context, options UpdateOptions) (Result, error) {
 	metadata.RuntimeSyncPending = metadata.RuntimeSyncPending || current.RuntimeSyncPending || options.RuntimeSyncPending
 	if err := catalog.SaveMetadataAtomicLocked(metadataPath, metadata); err != nil {
 		commitReleaseRoot()
-		return updateFailure(options, metadata, groupDir, started, response, "metadata.write_failed", "订阅元数据写入失败", err)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "metadata.write_failed", "订阅元数据写入失败", err)
 	}
 	metadataContent, err := os.ReadFile(metadataPath)
 	if err != nil {
 		commitReleaseRoot()
-		return updateFailure(options, metadata, groupDir, started, response, "metadata.read_failed", "读取临时元数据失败", err)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "metadata.read_failed", "读取临时元数据失败", err)
 	}
 	if err := catalog.CommitPairLocked(options.Root, groupDir, providerContent, metadataContent); err != nil {
 		commitReleaseRoot()
-		return updateFailure(options, metadata, groupDir, started, response, "subscription.commit_failed", "订阅 Provider 与元数据提交失败", err)
+		return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.commit_failed", "订阅 Provider 与元数据提交失败", err)
 	}
 	commitReleaseRoot()
 
@@ -509,8 +511,8 @@ func Update(ctx context.Context, options UpdateOptions) (Result, error) {
 	}, nil
 }
 
-func commitNotModified(options UpdateOptions, groupDir, metaPath string, initial catalog.Metadata, response fetch.Response, usedProxy bool) (Result, error) {
-	releaseRoot, err := catalog.AcquireRoot(options.Root)
+func commitNotModified(ctx context.Context, options UpdateOptions, groupDir, metaPath string, initial catalog.Metadata, response fetch.Response, usedProxy bool) (Result, error) {
+	releaseRoot, err := catalog.AcquireRoot(ctx, options.Root)
 	if err != nil {
 		clearProgress(options.ProgressDir, options.GroupID)
 		return Result{}, &Error{Code: "subscription.busy", Message: "订阅或 Catalog 正在被其他进程使用", Data: err.Error()}
@@ -534,7 +536,13 @@ func commitNotModified(options UpdateOptions, groupDir, metaPath string, initial
 		clearProgress(options.ProgressDir, options.GroupID)
 		return Result{}, updateConflict(options.GroupID, initial, current)
 	}
-	metadata := applyResponseMetadata(current, response.Metadata, options.Now)
+	metadata := applyResponseMetadata(current, response.Metadata)
+	if response.Metadata.ETag != "" {
+		metadata.ETag = response.Metadata.ETag
+	}
+	if response.Metadata.LastModified != "" {
+		metadata.LastModified = response.Metadata.LastModified
+	}
 	metadata.Name = resolveName(metadata)
 	preserveRuntimeError := metadata.RuntimeSyncPending && isRuntimeSyncError(metadata.LastError)
 	metadata.LastAttemptAt = formatTime(options.Now)
@@ -574,6 +582,17 @@ func commitNotModified(options UpdateOptions, groupDir, metaPath string, initial
 }
 
 func fetchSubscription(ctx context.Context, metadata catalog.Metadata, options UpdateOptions) (fetch.Response, bool, error) {
+	if options.TransferContext != nil {
+		downloadContext, cancel := context.WithCancel(ctx)
+		stop := context.AfterFunc(options.TransferContext, cancel)
+		defer stop()
+		defer cancel()
+		// AfterFunc 异步执行；已结束的服务不能在回调运行前发起新下载。
+		if options.TransferContext.Err() != nil {
+			cancel()
+		}
+		ctx = downloadContext
+	}
 	request := fetch.Request{
 		URL: metadata.URL, UserAgent: metadata.UserAgent, HWID: metadata.HWID,
 		Headers: metadata.CustomHeaders, ETag: metadata.ETag, LastModified: metadata.LastModified,
@@ -610,8 +629,10 @@ func (err *progressWriteError) Unwrap() error {
 	return err.cause
 }
 
-func updateFailure(options UpdateOptions, metadata catalog.Metadata, groupDir string, started time.Time, response fetch.Response, code, message string, cause error) (Result, error) {
-	releaseRoot, err := catalog.AcquireRoot(options.Root)
+func updateFailure(ctx context.Context, options UpdateOptions, metadata catalog.Metadata, groupDir string, started time.Time, response fetch.Response, code, message string, cause error) (Result, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	releaseRoot, err := catalog.AcquireRoot(ctx, options.Root)
 	if err != nil {
 		clearProgress(options.ProgressDir, options.GroupID)
 		return Result{}, &Error{Code: "subscription.busy", Message: "订阅或 Catalog 正在被其他进程使用", Data: err.Error()}
@@ -639,7 +660,7 @@ func updateFailure(options UpdateOptions, metadata catalog.Metadata, groupDir st
 
 func updateFailureLocked(options UpdateOptions, metadata catalog.Metadata, groupDir string, started time.Time, response fetch.Response, code, message string, cause error) (Result, error) {
 	now := options.Now
-	metadata = applyResponseMetadata(metadata, response.Metadata, now)
+	metadata = applyResponseMetadata(metadata, response.Metadata)
 	metadata.LastAttemptAt = formatTime(now)
 	if !metadata.RuntimeSyncPending || !isRuntimeSyncError(metadata.LastError) {
 		metadata.LastError = message
@@ -695,15 +716,9 @@ func updateConflict(groupID string, expected, current catalog.Metadata) *Error {
 	}}
 }
 
-func applyResponseMetadata(metadata catalog.Metadata, response fetch.Metadata, now time.Time) catalog.Metadata {
+func applyResponseMetadata(metadata catalog.Metadata, response fetch.Metadata) catalog.Metadata {
 	if response.StatusCode > 0 {
 		metadata.LastStatusCode = response.StatusCode
-	}
-	if response.ETag != "" {
-		metadata.ETag = response.ETag
-	}
-	if response.LastModified != "" {
-		metadata.LastModified = response.LastModified
 	}
 	if response.ProfileTitle != "" {
 		metadata.ProfileTitle = response.ProfileTitle
@@ -729,7 +744,6 @@ func applyResponseMetadata(metadata catalog.Metadata, response fetch.Metadata, n
 		metadata.UpdateInterval = *response.UpdateIntervalSeconds
 		metadata.IntervalSource = "profile"
 	}
-	_ = now
 	return metadata
 }
 

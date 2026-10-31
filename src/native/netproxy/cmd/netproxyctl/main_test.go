@@ -2,10 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
 )
 
 func TestWriteJSONPreservesEmptyDataObject(t *testing.T) {
@@ -16,53 +20,34 @@ func TestWriteJSONPreservesEmptyDataObject(t *testing.T) {
 	}
 }
 
-func TestModuleArgsKeepsOperationBeforeFlags(t *testing.T) {
-	command := &cli{
-		moduleDir: "/module",
+func TestActivityExcludesHelpAndInstallationChecks(t *testing.T) {
+	for _, args := range [][]string{{"service", "check"}, {"config", "validate"}, {"config", "check"}, {"sub", "--help"}} {
+		if !skipActivity(args) {
+			t.Fatalf("帮助或安装检查被计为活跃: %v", args)
+		}
 	}
-
-	got := command.moduleArgs("node", "add", "socks://example.com:1080#node")
-	wantPrefix := []string{"add", "--module-dir", "/module"}
-	if !reflect.DeepEqual(got[:len(wantPrefix)], wantPrefix) {
-		t.Fatalf("operation prefix = %v, want %v", got[:len(wantPrefix)], wantPrefix)
-	}
-	if got[len(got)-1] != "socks://example.com:1080#node" {
-		t.Fatalf("node argument = %q", got[len(got)-1])
-	}
-
-	got = command.moduleArgs("mode", "AllowAds")
-	if got[0] != "--module-dir" || got[1] != "/module" || got[2] != "AllowAds" {
-		t.Fatalf("mode arguments were not placed after flags: %v", got)
-	}
-	if got[len(got)-1] != "AllowAds" {
-		t.Fatalf("mode argument = %q", got[len(got)-1])
-	}
-
-	got = command.moduleArgs("network", "evaluate", "--type", "wifi", "--ssid", "办公 WiFi")
-	if !reflect.DeepEqual(got[:3], []string{"evaluate", "--module-dir", "/module"}) {
-		t.Fatalf("network operation prefix = %v", got[:3])
-	}
-	if got[len(got)-1] != "办公 WiFi" {
-		t.Fatalf("network SSID argument = %q", got[len(got)-1])
+	for _, args := range [][]string{{"service", "status"}, {"service", "stop"}, {"node", "list"}, {"config", "read", "module"}} {
+		if skipActivity(args) {
+			t.Fatalf("有效客户端操作未被计为活跃: %v", args)
+		}
 	}
 }
 
-func TestNodeReadArgsStartsWithOperation(t *testing.T) {
-	command := &cli{moduleDir: "/module"}
-	got := command.nodeReadArgs("nodes", "--format", "json")
-	want := []string{"nodes", "--module-dir", "/module", "--format", "json"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("node read args = %v, want %v", got, want)
+func TestBareEBPFUsesConfiguredStatus(t *testing.T) {
+	command := &cli{options: moduleapp.NewOptions(t.TempDir())}
+	implicit := command.ebpf(context.Background(), nil)
+	explicit := command.ebpf(context.Background(), []string{"status", "configured"})
+	if implicit == nil || explicit == nil || implicit.Error() != explicit.Error() {
+		t.Fatalf("默认诊断行为不一致: %v / %v", implicit, explicit)
 	}
 }
 
-func TestNodeImportArgsOnlyAcceptsFile(t *testing.T) {
-	got, ok := nodeImportArgs([]string{"nodes.yaml"})
-	if !ok || !reflect.DeepEqual(got, []string{"import", "nodes.yaml"}) {
-		t.Fatalf("node import args = %v, %v", got, ok)
-	}
-	if _, ok := nodeImportArgs([]string{"nodes.yaml", "自定义分组"}); ok {
-		t.Fatal("node import should reject the removed group name argument")
+func TestNodeImportRejectsExtraGroupBeforeReadingFile(t *testing.T) {
+	command := &cli{options: moduleapp.NewOptions(t.TempDir())}
+	err := command.node(context.Background(), []string{"import", "nodes.yaml", "custom"})
+	structured, ok := errors.AsType[*resultError](err)
+	if !ok || structured.Code != "usage.invalid" {
+		t.Fatalf("导入参数契约错误: %v", err)
 	}
 }
 

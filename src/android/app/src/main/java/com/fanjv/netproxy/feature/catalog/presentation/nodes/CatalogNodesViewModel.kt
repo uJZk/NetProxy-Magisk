@@ -4,19 +4,26 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fanjv.netproxy.R
+import com.fanjv.netproxy.core.api.ModuleApiException
 import com.fanjv.netproxy.core.ui.UiText
 import com.fanjv.netproxy.core.ui.toUiText
 import com.fanjv.netproxy.core.ui.userMessage
 import com.fanjv.netproxy.feature.catalog.data.NodeImportStore
 import com.fanjv.netproxy.feature.catalog.data.NodeRepository
 import com.fanjv.netproxy.feature.catalog.model.CatalogNodeGroup
+import com.fanjv.netproxy.feature.catalog.model.CatalogNodesSnapshot
 import com.fanjv.netproxy.feature.catalog.model.CurrentNodeSelection
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 internal data class CatalogNodesUiState(
@@ -27,67 +34,89 @@ internal data class CatalogNodesUiState(
     val focusGroupRevision: Long = 0,
     val latencies: Map<String, String> = emptyMap(),
     val loading: Boolean = false,
+    val loadFailed: Boolean = false,
     val operation: String = "",
     val error: UiText = UiText.Empty,
     val notice: UiText = UiText.Empty,
     val noticeId: Long = 0,
     val exportedNodeLink: String = "",
     val exportedNodeLinkId: Long = 0
-)
+) {
+    fun withSnapshot(snapshot: CatalogNodesSnapshot): CatalogNodesUiState = copy(
+        groups = snapshot.groups,
+        selection = snapshot.selection,
+        selectedGroupId = selectedGroupId.takeIf { id -> snapshot.groups.any { it.group.id == id } }
+            ?: snapshot.selection.activeGroupId.takeIf(String::isNotBlank)
+            ?: snapshot.groups.firstOrNull()?.group?.id.orEmpty(),
+        loading = false,
+        loadFailed = false,
+    )
+}
 
 internal class CatalogNodesViewModel(
     private val repository: NodeRepository,
-    private val importStore: NodeImportStore
-) : ViewModel() {
+    private val importNode: suspend (Uri) -> Unit,
+    scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+) : ViewModel(scope) {
+    constructor(
+        repository: NodeRepository,
+        importStore: NodeImportStore,
+        scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+    ) : this(repository, { uri ->
+        repository.import(importStore.read(uri))
+        Unit
+    }, scope)
+
     private val _state = MutableStateFlow(CatalogNodesUiState())
     val state: StateFlow<CatalogNodesUiState> = _state.asStateFlow()
     private var refreshJob: Job? = null
-    private var refreshPending = false
+    private var refreshRevision = 0L
     private var loaded = false
+    private var eventsJob: Job? = null
 
     fun setVisible(visible: Boolean) {
-        if (visible) refresh(silent = loaded)
+        if (!visible) { eventsJob?.cancel(); eventsJob = null; return }
+        refresh(silent = loaded)
+        if (eventsJob?.isActive == true) return
+        eventsJob = viewModelScope.launch {
+            repository.observe().collect { result ->
+                if (_state.value.operation.isEmpty()) result.fold(
+                    onSuccess = { snapshot ->
+                        ++refreshRevision
+                        refreshJob?.cancel()
+                        _state.update { it.withSnapshot(snapshot) }
+                        loaded = true
+                    },
+                    onFailure = { error -> _state.update { it.copy(error = error.userMessage().toUiText(), noticeId = it.noticeId + 1) } }
+                )
+            }
+        }
     }
 
     fun refresh(silent: Boolean = false) {
-        if (refreshJob?.isActive == true) {
-            refreshPending = true
-            return
-        }
+        if (_state.value.operation.isNotEmpty()) return
+        val revision = ++refreshRevision
+        refreshJob?.cancel()
+        if (!silent) _state.update { it.copy(loading = true, error = UiText.Empty) }
         refreshJob = viewModelScope.launch {
             try {
-                if (!silent) _state.update { it.copy(loading = true, error = UiText.Empty) }
-                runCatching { repository.snapshot() }.onSuccess { snapshot ->
-                    val groups = snapshot.groups
-                    val selection = snapshot.selection
-                    _state.update { old ->
-                        val selected = old.selectedGroupId
-                            .takeIf { id -> groups.any { it.group.id == id } }
-                            ?: selection.activeGroupId.takeIf(String::isNotBlank)
-                            ?: groups.firstOrNull()?.group?.id.orEmpty()
-                        old.copy(
-                            groups = groups,
-                            selection = selection,
-                            selectedGroupId = selected,
-                            loading = false,
-                            error = UiText.Empty
-                        )
-                    }
-                    loaded = true
-                }.onFailure { error ->
+                val snapshot = repository.snapshot()
+                currentCoroutineContext().ensureActive()
+                if (revision != refreshRevision) return@launch
+                _state.update { it.withSnapshot(snapshot) }
+                loaded = true
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                currentCoroutineContext().ensureActive()
+                if (revision == refreshRevision) {
                     _state.update {
                         it.copy(
                             loading = false,
+                            loadFailed = true,
                             error = error.userMessage().toUiText(),
                             noticeId = it.noticeId + 1
                         )
                     }
-                }
-            } finally {
-                refreshJob = null
-                if (refreshPending && isActive) {
-                    refreshPending = false
-                    refresh(silent = true)
                 }
             }
         }
@@ -99,23 +128,23 @@ internal class CatalogNodesViewModel(
 
     fun useAuto(groupId: String) = runOperation("select", refreshAfter = false) {
         repository.selectAuto(groupId)
+        val snapshot = repository.snapshot()
+        currentCoroutineContext().ensureActive()
         _state.update {
-            it.copy(
-                selection = CurrentNodeSelection(groupId, "urltest", "Auto/$groupId"),
-                selectedGroupId = groupId
-            )
+            it.withSnapshot(snapshot).copy(selectedGroupId = groupId)
         }
+        loaded = true
         UiText.Resource(R.string.node_switched_auto)
     }
 
     fun useNode(groupId: String, tag: String) = runOperation("select", refreshAfter = false) {
         repository.select("$groupId/$tag")
+        val snapshot = repository.snapshot()
+        currentCoroutineContext().ensureActive()
         _state.update {
-            it.copy(
-                selection = CurrentNodeSelection(groupId, "manual", "$groupId/$tag"),
-                selectedGroupId = groupId
-            )
+            it.withSnapshot(snapshot).copy(selectedGroupId = groupId)
         }
+        loaded = true
         UiText.Resource(R.string.node_switched, listOf(tag))
     }
 
@@ -148,11 +177,14 @@ internal class CatalogNodesViewModel(
             _state.update { it.copy(operation = "edit", error = UiText.Empty) }
             runCatching { repository.editJson(nodeRef, content) }
                 .onSuccess {
+                    currentCoroutineContext().ensureActive()
                     _state.update { it.copy(operation = "") }
                     refresh(silent = true)
                     onResult(true)
                 }
                 .onFailure { error ->
+                    if (error is CancellationException) throw error
+                    currentCoroutineContext().ensureActive()
                     _state.update {
                         it.copy(
                             operation = "",
@@ -160,6 +192,7 @@ internal class CatalogNodesViewModel(
                             noticeId = it.noticeId + 1
                         )
                     }
+                    if ((error as? ModuleApiException)?.persisted == true) refresh(silent = true)
                     onResult(false)
                 }
         }
@@ -171,6 +204,7 @@ internal class CatalogNodesViewModel(
             _state.update { it.copy(operation = "export", error = UiText.Empty) }
             runCatching { repository.export("$groupId/$tag") }
                 .onSuccess { exported ->
+                    currentCoroutineContext().ensureActive()
                     _state.update {
                         it.copy(
                             operation = "",
@@ -179,7 +213,10 @@ internal class CatalogNodesViewModel(
                         )
                     }
                 }
-                .onFailure(::publishError)
+                .onFailure { error ->
+                    currentCoroutineContext().ensureActive()
+                    publishError(error)
+                }
         }
     }
 
@@ -214,9 +251,7 @@ internal class CatalogNodesViewModel(
     fun importFile(uri: Uri) = runOperation(
         name = "import",
         action = {
-            importStore.withImportedFile(uri) { temporary ->
-                repository.import(temporary.absolutePath)
-            }
+            importNode(uri)
             UiText.Resource(R.string.node_file_added)
         },
         onSuccess = {
@@ -235,6 +270,7 @@ internal class CatalogNodesViewModel(
     }
 
     private fun publishError(error: Throwable) {
+        if (error is CancellationException) throw error
         publishError(error.userMessage().toUiText())
     }
 
@@ -264,6 +300,7 @@ internal class CatalogNodesViewModel(
             }
             runCatching { repository.testDelay(requestTarget, requestGroupId) }
                 .onSuccess { result ->
+                    currentCoroutineContext().ensureActive()
                     val persistentGroupId = requestGroupId.ifBlank {
                         requestTarget.takeIf { '/' in it }?.substringBefore('/').orEmpty()
                     }
@@ -303,6 +340,8 @@ internal class CatalogNodesViewModel(
                     }
                 }
                 .onFailure { error ->
+                    if (error is CancellationException) throw error
+                    currentCoroutineContext().ensureActive()
                     _state.update { current ->
                         current.copy(
                             operation = "",
@@ -338,10 +377,13 @@ internal class CatalogNodesViewModel(
         action: suspend () -> UiText
     ) {
         if (_state.value.operation.isNotEmpty()) return
+        refreshRevision++
+        refreshJob?.cancel()
+        _state.update { it.copy(operation = name, loading = false, error = UiText.Empty) }
         viewModelScope.launch {
-            _state.update { it.copy(operation = name, error = UiText.Empty) }
             runCatching { action() }
                 .onSuccess { message ->
+                    currentCoroutineContext().ensureActive()
                     _state.update {
                         it.copy(
                             operation = "",
@@ -353,6 +395,8 @@ internal class CatalogNodesViewModel(
                     if (refreshAfter) refresh(silent = true)
                 }
                 .onFailure { error ->
+                    if (error is CancellationException) throw error
+                    currentCoroutineContext().ensureActive()
                     _state.update {
                         it.copy(
                             operation = "",
@@ -360,6 +404,7 @@ internal class CatalogNodesViewModel(
                             noticeId = it.noticeId + 1
                         )
                     }
+                    if (name == "select" || (error as? ModuleApiException)?.persisted == true) refresh(silent = true)
                 }
         }
     }
@@ -371,3 +416,17 @@ internal class CatalogNodesViewModel(
 
 internal fun groupAutoDelay(measured: Map<String, String>, nodeTargets: List<String>): String? =
     nodeTargets.mapNotNull { measured[it]?.toIntOrNull() }.minOrNull()?.toString()
+
+internal fun selectedAutoNodeTag(
+    group: CatalogNodeGroup,
+    selection: CurrentNodeSelection
+): String {
+    if (selection.selectorMode != "urltest" || selection.activeGroupId != group.group.id) return ""
+    val prefix = selection.activeGroupRuntimeTag.takeIf(String::isNotBlank)?.let { "$it/" } ?: return ""
+    val nodeTag = selection.runtimeSelected
+        .takeIf { it.startsWith(prefix) }
+        ?.removePrefix(prefix)
+        ?.takeIf(String::isNotBlank)
+        ?: return ""
+    return nodeTag.takeIf { tag -> group.nodes.any { it.tag == tag } }.orEmpty()
+}

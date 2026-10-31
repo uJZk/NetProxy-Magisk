@@ -13,11 +13,11 @@ import (
 )
 
 // ResolveGroup 按分组 ID 或唯一显示名称解析分组。
-func ResolveGroup(root, query string) (string, error) {
+func ResolveGroup(ctx context.Context, root, query string) (string, error) {
 	if strings.TrimSpace(root) == "" || strings.TrimSpace(query) == "" {
 		return "", errors.New("Catalog 根目录和分组查询不能为空")
 	}
-	release, err := acquireCatalogRootAndRecover(root)
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return "", err
 	}
@@ -60,43 +60,9 @@ func ResolveGroup(root, query string) (string, error) {
 	return "", fmt.Errorf("分组不存在: %s", query)
 }
 
-// GroupHasNodes 判断分组是否包含节点。
-func GroupHasNodes(ctx context.Context, root, groupID string) (bool, error) {
-	release, err := acquireCatalogRootAndRecover(root)
-	if err != nil {
-		return false, err
-	}
-	defer release()
-	hasNodes, err := provider.FileHasNodes(ctx, filepath.Join(root, groupID, "provider.json"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return hasNodes, nil
-}
-
-// GroupFirstTag 返回分组按标签排序后的第一个节点标签。
-func GroupFirstTag(ctx context.Context, root, groupID string) (string, error) {
-	release, err := acquireCatalogRootAndRecover(root)
-	if err != nil {
-		return "", err
-	}
-	defer release()
-	nodes, err := provider.InspectFile(ctx, filepath.Join(root, groupID, "provider.json"))
-	if err != nil {
-		return "", err
-	}
-	if len(nodes) == 0 {
-		return "", nil
-	}
-	return nodes[0].Tag, nil
-}
-
 // GroupContainsTag 判断分组是否包含指定节点标签。
 func GroupContainsTag(ctx context.Context, root, groupID, tag string) (bool, error) {
-	release, err := acquireCatalogRootAndRecover(root)
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return false, err
 	}
@@ -113,7 +79,7 @@ func GroupContainsTag(ctx context.Context, root, groupID, tag string) (bool, err
 
 // GroupNode 返回分组中指定节点的标准 Provider JSON。
 func GroupNode(ctx context.Context, root, groupID, tag string) (provider.Document, error) {
-	release, err := acquireCatalogRootAndRecover(root)
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return provider.Document{}, err
 	}
@@ -131,7 +97,7 @@ func GroupNode(ctx context.Context, root, groupID, tag string) (provider.Documen
 
 // GroupProvider 返回分组当前 Provider 的只读快照。
 func GroupProvider(ctx context.Context, root, groupID string) (provider.Document, error) {
-	release, err := acquireCatalogRootAndRecover(root)
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return provider.Document{}, err
 	}
@@ -141,7 +107,7 @@ func GroupProvider(ctx context.Context, root, groupID string) (provider.Document
 
 // ExportGroupNode 将 Catalog 节点导出为分享链接。
 func ExportGroupNode(ctx context.Context, root, groupID, tag string) (sharelink.Result, error) {
-	release, err := acquireCatalogRootAndRecover(root)
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return sharelink.Result{}, err
 	}
@@ -154,11 +120,11 @@ func ExportGroupNode(ctx context.Context, root, groupID, tag string) (sharelink.
 }
 
 // PrivateMetadata 返回订阅编辑所需的完整元数据。
-func PrivateMetadata(root, groupID string) (Metadata, error) {
+func PrivateMetadata(ctx context.Context, root, groupID string) (Metadata, error) {
 	if !isValidGroupID(groupID) {
 		return Metadata{}, fmt.Errorf("非法分组 ID: %s", groupID)
 	}
-	release, err := acquireCatalogRootAndRecover(root)
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return Metadata{}, err
 	}
@@ -167,41 +133,20 @@ func PrivateMetadata(root, groupID string) (Metadata, error) {
 }
 
 // GroupType 返回分组类型。
-func GroupType(root, groupID string) (string, error) {
-	metadata, err := PrivateMetadata(root, groupID)
+func GroupType(ctx context.Context, root, groupID string) (string, error) {
+	metadata, err := PrivateMetadata(ctx, root, groupID)
 	if err != nil {
 		return "", err
 	}
 	return metadata.Type, nil
 }
 
-// FirstNonEmptyGroup 返回第一个有节点的分组 ID，可排除指定分组。
-func FirstNonEmptyGroup(ctx context.Context, root, exclude string) (string, error) {
-	ids, err := GroupIDs(root, "all")
-	if err != nil {
-		return "", err
-	}
-	for _, groupID := range ids {
-		if groupID == exclude {
-			continue
-		}
-		hasNodes, err := GroupHasNodes(ctx, root, groupID)
-		if err != nil {
-			return "", err
-		}
-		if hasNodes {
-			return groupID, nil
-		}
-	}
-	return "", nil
-}
-
 // DeleteGroup 删除 Catalog 分组目录。
-func DeleteGroup(root, groupID string) error {
+func DeleteGroup(ctx context.Context, root, groupID string) error {
 	if !isValidGroupID(groupID) || groupID == "default" {
 		return fmt.Errorf("不允许删除分组: %s", groupID)
 	}
-	release, err := acquireCatalogMutation(root, groupID)
+	release, err := acquireCatalogMutation(ctx, root, groupID)
 	if err != nil {
 		return err
 	}

@@ -3,13 +3,20 @@ package com.fanjv.netproxy.feature.dashboard.presentation
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fanjv.netproxy.R
-import com.fanjv.netproxy.core.module.ModuleEnvironment
+import com.fanjv.netproxy.core.module.ModuleAvailability
 import com.fanjv.netproxy.core.module.ServiceRepository
 import com.fanjv.netproxy.core.module.ServiceStatusSnapshot
 import com.fanjv.netproxy.core.ui.UiText
 import com.fanjv.netproxy.core.ui.toUiText
 import com.fanjv.netproxy.core.ui.userMessage
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,18 +24,20 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.net.NetworkInterface
 
 internal data class CatalogDashboardUiState(
-    val rootChecked: Boolean = false,
-    val rootGranted: Boolean = false,
-    val moduleInstalled: Boolean = false,
+    val connection: ModuleAvailability? = null,
     val loading: Boolean = true,
     val serviceState: String = "stopped",
     val serviceError: String = "",
     val readyAt: Long = 0,
     val uptimeSeconds: Long = 0,
     val outboundMode: String = "unknown",
+    val availableOutboundModes: List<String> = emptyList(),
     val activeGroupId: String = "",
     val currentNode: String = "",
     val downloadBytesPerSecond: Long = 0,
@@ -43,6 +52,7 @@ internal data class CatalogDashboardUiState(
     val notice: UiText = UiText.Empty,
     val noticeId: Long = 0
 ) {
+    val connected: Boolean get() = connection?.available == true
     val isServiceTransitioning: Boolean
         get() = operation == "start" || operation == "stop"
     val isReady: Boolean
@@ -55,50 +65,61 @@ internal data class CatalogDashboardUiState(
         get() = isStarting || isStopping || operation.isNotEmpty()
 }
 
-/** 仅消费 netproxyctl 与运行时 API 的仪表盘状态，不读取旧配置或 PID。 */
+/** 仅消费模块 API 与共享事件快照，不读取设备配置或 PID。 */
 internal class CatalogDashboardViewModel(
     private val repository: ServiceRepository,
-    private val environment: ModuleEnvironment
-) : ViewModel() {
+    totalMemoryBytes: Long,
+    scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+) : ViewModel(scope) {
     private val _state = MutableStateFlow(CatalogDashboardUiState())
     val state: StateFlow<CatalogDashboardUiState> = _state.asStateFlow()
-    private var refreshJob: Job? = null
+    private var eventsJob: Job? = null
+    private var snapshotJob: Job? = null
     private var uptimeJob: Job? = null
     private var visible = false
-    private var serviceTransitionRevision = 0L
-    private val totalMemoryBytes = environment.totalMemoryBytes
+    private var stateRevision = 0L
+    private val controlMutex = Mutex()
     private val snapshotReducer = DashboardSnapshotReducer(totalMemoryBytes)
     private val trafficReducer = TrafficTimelineReducer()
 
-    init {
-        viewModelScope.launch {
-            val availability = environment.availability()
-            _state.update {
-                it.copy(
-                    rootChecked = true,
-                    rootGranted = availability.rootGranted,
-                    moduleInstalled = availability.moduleInstalled,
-                    loading = availability.moduleInstalled
-                )
-            }
-            if (availability.moduleInstalled && visible) startPolling()
+    fun setAvailability(availability: ModuleAvailability?) {
+        val previous = _state.value
+        val available = availability?.available == true
+        _state.update {
+            it.copy(connection = availability,
+                loading = available && (!previous.connected || previous.loading))
+        }
+        if (available && visible) {
+            startUptimeTicker()
+            startEvents()
+        } else if (!available) {
+            eventsJob?.cancel()
+            eventsJob = null
+            snapshotJob?.cancel()
+            uptimeJob?.cancel()
+            if (previous.operation.isEmpty()) stateRevision++
         }
     }
 
     fun refresh() {
-        if (_state.value.moduleInstalled) {
-            viewModelScope.launch { refreshSnapshot() }
+        if (_state.value.connected) {
+            refreshSnapshot()
         }
     }
 
     fun setVisible(visible: Boolean) {
         this.visible = visible
         if (visible) {
-            startUptimeTicker()
-            if (_state.value.moduleInstalled) startPolling()
+            if (_state.value.connected) {
+                refreshSnapshot()
+                startUptimeTicker()
+                startEvents()
+            }
         } else {
-            refreshJob?.cancel()
-            refreshJob = null
+            eventsJob?.cancel()
+            eventsJob = null
+            snapshotJob?.cancel()
+            if (_state.value.operation.isEmpty()) stateRevision++
             uptimeJob?.cancel()
             uptimeJob = null
         }
@@ -122,7 +143,8 @@ internal class CatalogDashboardViewModel(
     }
 
     fun setMode(mode: String) {
-        if (!canControlService()) return
+        val current = _state.value
+        if (!current.connected || current.loading || mode !in current.availableOutboundModes) return
         runOperation("mode") {
             repository.setMode(mode)
             UiText.Resource(R.string.dashboard_mode_changed)
@@ -130,8 +152,7 @@ internal class CatalogDashboardViewModel(
     }
 
     private fun canControlService(): Boolean =
-        _state.value.rootGranted &&
-            _state.value.moduleInstalled &&
+        _state.value.connected &&
             !_state.value.loading &&
             _state.value.operation.isEmpty()
 
@@ -139,13 +160,17 @@ internal class CatalogDashboardViewModel(
         _state.update { it.copy(notice = UiText.Empty) }
     }
 
-    private fun startPolling() {
-        refreshJob?.cancel()
-        refreshJob = viewModelScope.launch {
-            refreshSnapshot()
-            while (isActive) {
-                delay(5000)
-                refreshSnapshot()
+    private fun startEvents() {
+        if (eventsJob?.isActive == true) return
+        eventsJob = viewModelScope.launch {
+            repository.observe().collect { result ->
+                if (_state.value.operation.isEmpty()) {
+                    val revision = ++stateRevision
+                    result.fold(
+                        onSuccess = { readSnapshot(revision, it) },
+                        onFailure = { error -> _state.update { it.copy(loading = false, serviceError = error.userMessage()) } }
+                    )
+                }
             }
         }
     }
@@ -166,14 +191,20 @@ internal class CatalogDashboardViewModel(
         }
     }
 
-    private suspend fun refreshSnapshot() {
-        if (_state.value.isServiceTransitioning) return
-        val requestRevision = serviceTransitionRevision
+    private fun refreshSnapshot() {
+        if (!_state.value.connected || _state.value.operation.isNotEmpty()) return
+        val requestRevision = ++stateRevision
+        snapshotJob?.cancel()
+        snapshotJob = viewModelScope.launch { readSnapshot(requestRevision) }
+    }
 
-        runCatching { repository.status() }.onSuccess { service ->
+    private suspend fun readSnapshot(requestRevision: Long, event: ServiceStatusSnapshot? = null) {
+        runCatching { event ?: repository.status() }.onSuccess { service ->
+            val localAddress = withContext(Dispatchers.IO) { localAddress() }
+            currentCoroutineContext().ensureActive()
             if (!shouldApplyDashboardSnapshot(
                     requestRevision = requestRevision,
-                    currentRevision = serviceTransitionRevision,
+                    currentRevision = stateRevision,
                     operation = _state.value.operation
                 )
             ) return@onSuccess
@@ -190,7 +221,7 @@ internal class CatalogDashboardViewModel(
                     current = current,
                     service = service,
                     nowMillis = nowMillis,
-                    localAddress = localAddress()
+                    localAddress = localAddress
                 ).copy(
                     downloadBytesPerSecond = timeline.downloadBytesPerSecond,
                     uploadBytesPerSecond = timeline.uploadBytesPerSecond,
@@ -198,9 +229,11 @@ internal class CatalogDashboardViewModel(
                 )
             }
         }.onFailure { error ->
+            if (error is CancellationException) throw error
+            currentCoroutineContext().ensureActive()
             if (!shouldApplyDashboardSnapshot(
                     requestRevision = requestRevision,
-                    currentRevision = serviceTransitionRevision,
+                    currentRevision = stateRevision,
                     operation = _state.value.operation
                 )
             ) return@onFailure
@@ -216,54 +249,42 @@ internal class CatalogDashboardViewModel(
     }
 
     private fun runOperation(name: String, action: suspend () -> UiText) {
-        viewModelScope.launch {
-            val changesServiceState = name == "start" || name == "stop"
-            val previousServiceState = _state.value.serviceState
-            if (changesServiceState) serviceTransitionRevision++
-            _state.update { current ->
-                current.copy(
-                    operation = name,
-                    serviceError = "",
-                    serviceState = when (name) {
-                        "start" -> "starting"
-                        "stop" -> "stopping"
-                        else -> current.serviceState
-                    }
-                )
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            controlMutex.withLock {
+                val requestRevision = ++stateRevision
+                snapshotJob?.cancel()
+                val previousServiceState = _state.value.serviceState
+                _state.update { current ->
+                    current.copy(
+                        operation = name,
+                        serviceError = "",
+                        serviceState = when (name) {
+                            "start" -> "starting"
+                            "stop" -> "stopping"
+                            else -> current.serviceState
+                        }
+                    )
+                }
+                val result = runCatching { action() }
+                val error = result.exceptionOrNull()
+                if (error is CancellationException) throw error
+                currentCoroutineContext().ensureActive()
+                if (requestRevision != stateRevision) return@withLock
+                _state.update {
+                    it.copy(
+                        operation = "",
+                        serviceState = when {
+                            error != null && name in setOf("start", "stop") -> previousServiceState
+                            error == null && name == "start" -> "ready"
+                            error == null && name == "stop" -> "stopped"
+                            else -> it.serviceState
+                        },
+                        notice = result.fold({ message -> message }, { it.userMessage().toUiText() }),
+                        noticeId = it.noticeId + 1
+                    )
+                }
+                refreshSnapshot()
             }
-            runCatching { action() }
-                .onSuccess { message ->
-                    if (changesServiceState) serviceTransitionRevision++
-                    _state.update {
-                        it.copy(
-                            operation = "",
-                            serviceState = when (name) {
-                                "start" -> "ready"
-                                "stop" -> "stopped"
-                                else -> it.serviceState
-                            },
-                            notice = message,
-                            noticeId = it.noticeId + 1
-                        )
-                    }
-                    refreshSnapshot()
-                }
-                .onFailure { error ->
-                    if (changesServiceState) serviceTransitionRevision++
-                    _state.update {
-                        it.copy(
-                            operation = "",
-                            serviceState = if (changesServiceState) {
-                                previousServiceState
-                            } else {
-                                it.serviceState
-                            },
-                            notice = error.userMessage().toUiText(),
-                            noticeId = it.noticeId + 1
-                        )
-                    }
-                    refreshSnapshot()
-                }
         }
     }
 
@@ -278,25 +299,41 @@ internal class CatalogDashboardViewModel(
     }.getOrDefault("--")
 }
 
-/** 仅接受当前启停代次且不处于过渡操作中的服务快照。 */
+/** 刷新、模式和启停共享代次，控制操作期间不接受任何服务快照。 */
 internal fun shouldApplyDashboardSnapshot(
     requestRevision: Long,
     currentRevision: Long,
     operation: String
-): Boolean = requestRevision == currentRevision && operation != "start" && operation != "stop"
+): Boolean = requestRevision == currentRevision && operation.isEmpty()
 
 /** 将持久选择状态转换为适合仪表盘展示的节点名称。 */
 internal fun dashboardNodeName(service: ServiceStatusSnapshot): String {
     if (service.activeGroupNodeCount <= 0) return ""
 
     val groupName = service.activeGroupName.ifBlank { service.activeGroupId }
-    val automatic = service.selectorMode == "urltest" || service.selectorMode == "auto"
-    val nodeName = if (automatic) {
-        "Auto-Fastest"
-    } else {
-        service.selectedNodeRef
-            .substringAfter('/', service.selectedNodeRef)
-            .ifBlank { service.runtimeSelected.substringAfter('/', service.runtimeSelected) }
+    val automatic = service.selectorMode == "urltest"
+    if (automatic) {
+        val selected = if (service.state == "ready") {
+            runtimeSelectedNodeTag(
+                service.activeGroupRuntimeTag,
+                service.runtimeSelected
+            )
+        } else {
+            ""
+        }
+        if (selected.isNotBlank()) return "$selected · Auto-Fastest"
+        return "$groupName/Auto-Fastest"
     }
+    val nodeName = service.selectedNodeRef
+        .substringAfter('/', service.selectedNodeRef)
+        .ifBlank { service.runtimeSelected.substringAfter('/', service.runtimeSelected) }
     return listOf(groupName, nodeName).filter(String::isNotBlank).joinToString("/")
+}
+
+internal fun runtimeSelectedNodeTag(runtimeTag: String, selected: String): String {
+    if (runtimeTag.isBlank()) return ""
+    val prefix = "$runtimeTag/"
+    return selected.removePrefix(prefix)
+        .takeIf { selected.startsWith(prefix) && it.isNotBlank() }
+        .orEmpty()
 }

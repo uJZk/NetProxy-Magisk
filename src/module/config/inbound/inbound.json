@@ -1,0 +1,43 @@
+{
+  "backend": "ebpf",
+  "root_policy": "include",
+  "app": {
+    "enabled": false,
+    "mode": "blacklist",
+    "proxy_apps": [],
+    "bypass_apps": []
+  },
+  "ebpf": {
+    "type": "ebpf",
+    "tag": "netproxy-in",
+    "network": ["tcp", "udp"],
+    "udp_timeout": "5m",
+    "tc_priority": 1,
+    "local": {
+      "enabled": true,
+      "data_plane": "socket_assign",
+      "dns_mode": "respect_policy",
+      "ipv6": true,
+      "bypass_private_address": true,
+      "bypass_rule_set": ["geoip/cn"]
+    },
+    "shared": {
+      "enabled": false,
+      "data_plane": "socket_assign",
+      "dns_mode": "hijack",
+      "interface": ["wlan2"],
+      "ipv6": true,
+      "bypass_private_address": true,
+      "bypass_rule_set": ["geoip/cn"]
+    }
+  },
+  "tun": {
+    "type": "tun",
+    "tag": "netproxy-in",
+    "interface_name": "netproxy",
+    "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+    "auto_route": true,
+    "auto_redirect": true,
+    "dns_mode": "hijack"
+  }
+}

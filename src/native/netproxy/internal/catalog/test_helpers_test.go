@@ -28,7 +28,7 @@ func importTestGroup(options testImportOptions) (MutationResult, error) {
 		AllowInsecure: options.AllowInsecure, Now: options.Now,
 	})
 	if err != nil {
-		_ = DeleteGroup(options.Root, options.GroupID)
+		_ = DeleteGroup(context.Background(), options.Root, options.GroupID)
 	}
 	return result, err
 }

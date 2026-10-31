@@ -1,46 +1,40 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	json "encoding/json/v2"
+
+	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
+	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
 )
 
-func (c *cli) runModuleCommand(args []string, action string, handler commandHandler) int {
-	if action == "app" && len(args) == 0 {
-		args = []string{"list"}
+func readActiveGroup(options moduleapp.Options) string {
+	module, err := moduleconfig.LoadModule(options.ModuleConfig)
+	if err != nil {
+		return ""
 	}
-	if action == "logs" && len(args) == 0 {
-		args = []string{"show"}
-	}
-	return c.runCommand(c.context(), handler, c.moduleArgs(action, args...)...)
+	return module.ActiveGroupID
 }
 
-func (c *cli) moduleArgs(action string, args ...string) []string {
-	result := make([]string, 0, len(args)+2)
-	if (action == "app" || action == "node" || action == "sub" || action == "network" || action == "config" || action == "logs") && len(args) > 0 {
-		result = append(result, args[0])
-		args = args[1:]
+func usageError(message string) error {
+	return &resultError{Code: "usage.invalid", Message: message, Status: 2}
+}
+
+type commandHandler func(context.Context, []string) error
+
+func (c *cli) runCommand(ctx context.Context, handler commandHandler, args ...string) int {
+	if err := handler(ctx, args); err != nil {
+		response, status := contract.Failure(ctx, err)
+		writeJSON(os.Stdout, response)
+		return status
 	}
-	result = append(result,
-		"--module-dir", c.moduleDir,
-	)
-	return append(result, args...)
-}
-
-func (c *cli) nodeReadArgs(action string, args ...string) []string {
-	result := []string{action}
-	result = append(result,
-		"--module-dir", c.moduleDir,
-	)
-	return append(result, args...)
-}
-
-func (c *cli) catalogArgs(args ...string) []string {
-	return append([]string{"--module-dir", c.moduleDir}, args...)
+	return 0
 }
 
 func (c *cli) fail(code, message string, status int) int {
@@ -63,17 +57,30 @@ func (c *cli) help() {
   netproxyctl [--json] [--timeout <秒|时长>] catalog list|show <分组>
   netproxyctl [--json] [--timeout <秒|时长>] node list|current|show|get|export|delay|add|import|edit|remove|use
   netproxyctl [--json] [--timeout <秒|时长>] sub list|show|add|edit|update|update-all|activate|remove|history|cancel
-  netproxyctl [--json] [--timeout <秒|时长>] mode [rule|global|direct|AllowAds]
+  netproxyctl [--json] [--timeout <秒|时长>] mode [模式名称]（不带参数列出配置中的模式）
   netproxyctl [--json] [--timeout <秒|时长>] network evaluate --type <wifi|not_wifi> [--ssid <名称>]
+  netproxyctl [--json] [--timeout <秒|时长>] network wifi-list
   netproxyctl [--json] [--timeout <秒|时长>] app list|mode|add|remove|enable|disable
   netproxyctl [--json] [--timeout <秒|时长>] ebpf status [configured|all|local|shared] [--raw]
-  netproxyctl [--json] [--timeout <秒|时长>] config list|read|check|validate|apply
+  netproxyctl [--json] [--timeout <秒|时长>] config list|read|check|validate|apply|raw
   netproxyctl [--json] [--timeout <秒|时长>] logs show|clear|export
+  netproxyctl [--json] [--timeout <秒|时长>] api init|start|status|access
+
+默认配置的出站模式:
+  Rule          规则
+  Proxy         代理
+  Direct        直连
+  RuleAllowAds  规则（允许广告）
+实际可选名称以 mode 返回的主配置模式列表为准。
 
 节点引用固定为 <group-id>/<tag>；自动模式使用 node use auto [分组]。
 node import <文件> 会将文件中的全部节点追加到 default 本地配置组。
 默认命令超时为 30 秒，service start 默认 120 秒；订阅变更由各订阅下载超时控制。
 所有命令均可使用 --timeout 显式覆盖。
+配置目标：singbox/config.json 为完整主配置，singbox/dns、singbox/inbounds、singbox/route 等为分区。
+模块设置：module 为完整 JSON，module/wifi 与 module/auto_start 分别编辑网络策略与开机自启。
+config read 返回 revision；config apply/validate 可在目标前传 --revision <值> 检测并发修改。
+分区内容保留顶层字段，例如 {"dns":{...}}；{} 删除该分区，不影响其他字段。
 stdout 只包含 schema=1 结果，运行日志写入 stderr。`)
 }
 

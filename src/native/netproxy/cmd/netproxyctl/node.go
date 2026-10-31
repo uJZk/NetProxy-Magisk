@@ -1,84 +1,147 @@
 package main
 
-func (c *cli) node(args []string) int {
+import (
+	"context"
+	"encoding/json/jsontext"
+	"errors"
+	"os"
+
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/catalog"
+	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/provider"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/service"
+)
+
+func (c *cli) node(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		args = []string{"list"}
 	}
 	action := args[0]
-	positionals := args[1:]
+	flags := newFlagSet("node " + action)
+	allowInsecure := flags.Bool("allow-insecure", false, "跳过节点 TLS 校验")
+	if err := flags.Parse(args[1:]); err != nil {
+		return err
+	}
+	positionals := flags.Args()
+	options := c.options
+	control := service.Options{
+		CatalogRoot: options.CatalogRoot, ModuleConfig: options.ModuleConfig, StateFile: options.StateFile,
+		ProgressDir: options.ProgressDir, WorkerPIDFile: options.WorkerPIDFile, SingBoxPath: options.SingBoxPath,
+		ServiceAddress: options.ServiceAddress, ServiceSecret: options.ServiceSecret, RequestTimeout: options.RequestTimeout,
+	}
+	switch action {
+	case "add", "import", "edit", "remove", "use", "show":
+		if len(positionals) == 0 {
+			return usageError("node 操作缺少参数")
+		}
+	}
 	switch action {
 	case "list":
-		readArgs := []string{"nodes", "--format", "json"}
-		if len(positionals) > 0 && positionals[0] != "" {
-			readArgs = append(readArgs, "--group", positionals[0])
+		groups, err := service.ReadNodes(ctx, control, first(positionals))
+		if err != nil {
+			return err
 		}
-		return c.runCommand(c.context(), runNodeRead, c.nodeReadArgs(readArgs[0], readArgs[1:]...)...)
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "node.list", Message: "节点列表", Data: groups})
+		return nil
 	case "snapshot":
-		readArgs := []string{"snapshot", "--format", "json"}
-		if len(positionals) > 0 && positionals[0] != "" {
-			readArgs = append(readArgs, "--group", positionals[0])
+		snapshot, err := service.ReadSnapshot(ctx, control, first(positionals))
+		if err != nil {
+			return err
 		}
-		return c.runCommand(c.context(), runNodeRead, c.nodeReadArgs(readArgs[0], readArgs[1:]...)...)
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "node.snapshot", Message: "节点快照", Data: snapshot})
+		return nil
 	case "current":
-		return c.runCommand(c.context(), runNodeRead, c.nodeReadArgs("selection", "--format", "json")...)
-	case "show":
-		if len(positionals) < 1 {
-			return c.fail("usage.invalid", "用法: netproxyctl node show <分组>", 2)
+		selection, err := service.ReadSelection(ctx, control)
+		if err != nil {
+			return err
 		}
-		return c.runCommand(c.context(), runCatalog, append([]string{"show"}, c.catalogArgs("--group", positionals[0], "--format", "json")...)...)
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "node.current", Message: "当前节点选择", Data: selection})
+		return nil
+	case "delay":
+		delay, err := service.Delay(ctx, control, first(positionals), second(positionals))
+		if err != nil {
+			if structured, ok := errors.AsType[*service.Error](err); ok {
+				return &resultError{Code: structured.Code, Message: structured.Message, Data: structured.Data}
+			}
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "node.delay", Message: "节点测速完成", Data: delay})
+		return nil
+
+	case "show":
+		return c.catalogSnapshot(ctx, positionals[0], true)
 	case "get", "export":
 		group, tag, ok := splitReference(first(positionals))
 		if !ok {
-			return c.fail("node.ref_invalid", "节点引用格式应为 <group-id>/<tag>", 2)
+			return &resultError{Code: "node.ref_invalid", Message: "节点引用格式应为 <group-id>/<tag>", Status: 2}
 		}
-		operation := "node-get"
 		if action == "export" {
-			operation = "node-export"
+			exported, err := catalog.ExportGroupNode(ctx, options.CatalogRoot, group, tag)
+			if err != nil {
+				return err
+			}
+			writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "node.exported", Message: "节点分享链接已生成", Data: exported})
+			return nil
 		}
-		return c.runCommand(c.context(), runCatalog, append([]string{operation}, c.catalogArgs("--group", group, "--tag", tag)...)...)
+		document, err := catalog.GroupNode(ctx, options.CatalogRoot, group, tag)
+		if err != nil {
+			return err
+		}
+		content, err := provider.Marshal(ctx, document)
+		if err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "node.loaded", Message: "节点配置已读取", Data: jsontext.Value(content)})
 	case "add":
-		if len(positionals) < 1 {
-			return c.fail("usage.invalid", "用法: netproxyctl node add <节点链接> [分组]", 2)
+		group := "default"
+		if len(positionals) > 1 {
+			group = positionals[1]
 		}
-		return c.runCommand(c.context(), runModuleNode, c.moduleArgs("node", append([]string{"add"}, positionals...)...)...)
+		data, err := moduleapp.NodeAppend(ctx, options, group, positionals[0], *allowInsecure)
+		if err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "node.added", Message: "节点已加入本地配置", Data: data})
 	case "import":
-		input, ok := nodeImportArgs(positionals)
-		if !ok {
-			return c.fail("usage.invalid", "用法: netproxyctl node import <文件>", 2)
+		if len(positionals) != 1 {
+			return usageError("用法: netproxyctl node import <文件>")
 		}
-		return c.runCommand(c.context(), runModuleNode, c.moduleArgs("node", input...)...)
+		data, err := moduleapp.NodeImport(ctx, options, positionals[0], *allowInsecure)
+		if err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "node.imported", Message: "文件节点已加入本地配置", Data: data})
 	case "edit":
 		if len(positionals) < 2 {
-			return c.fail("usage.invalid", "用法: netproxyctl node edit <分组/tag> <节点链接|文件>", 2)
+			return errors.New("node edit 需要节点引用和节点内容")
 		}
-		return c.runCommand(c.context(), runModuleNode, c.moduleArgs("node", "edit", positionals[0], positionals[1])...)
+		data, err := moduleapp.NodeEdit(ctx, options, positionals[0], positionals[1], *allowInsecure)
+		if err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "node.edited", Message: "节点已更新", Data: data})
 	case "remove":
-		if len(positionals) < 1 {
-			return c.fail("usage.invalid", "用法: netproxyctl node remove <分组/tag>", 2)
+		data, err := moduleapp.NodeRemove(ctx, options, positionals[0])
+		if err != nil {
+			return err
 		}
-		return c.runCommand(c.context(), runModuleNode, c.moduleArgs("node", "remove", positionals[0])...)
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "node.removed", Message: "节点已删除", Data: data})
+
 	case "use":
-		if len(positionals) < 1 {
-			return c.fail("usage.invalid", "用法: netproxyctl node use <分组/tag|auto> [分组]", 2)
+		data, err := moduleapp.SelectNode(ctx, options, positionals[0], second(positionals))
+		if err != nil {
+			return err
 		}
-		return c.runCommand(c.context(), runModuleSelect, c.moduleArgs("select", positionals...)...)
-	case "delay":
-		readArgs := []string{"delay", "--format", "json"}
-		if len(positionals) > 0 && positionals[0] != "" {
-			readArgs = append(readArgs, "--target", positionals[0])
-		}
-		if len(positionals) > 1 && positionals[1] != "" {
-			readArgs = append(readArgs, "--group", positionals[1])
-		}
-		return c.runCommand(c.context(), runNodeRead, c.nodeReadArgs(readArgs[0], readArgs[1:]...)...)
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "node.selected", Message: "节点选择已更新", Data: data})
 	default:
-		return c.fail("usage.invalid", "用法: netproxyctl node list|snapshot|current|show|get|export|delay|add|import|edit|remove|use", 2)
+		return usageError("用法: netproxyctl node list|snapshot|current|show|get|export|delay|add|import|edit|remove|use")
 	}
+	return nil
 }
 
-func nodeImportArgs(positionals []string) ([]string, bool) {
-	if len(positionals) != 1 {
-		return nil, false
+func second(values []string) string {
+	if len(values) < 2 {
+		return ""
 	}
-	return []string{"import", positionals[0]}, true
+	return values[1]
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,37 @@ import (
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/fetch"
 )
+
+func TestSubscriptionClosesRequestTransport(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusNotModified} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			closed := make(chan struct{}, 4)
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+				if status == http.StatusOK {
+					_, _ = w.Write([]byte("fixture"))
+				}
+			}))
+			server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+				if state == http.StateClosed {
+					closed <- struct{}{}
+				}
+			}
+			server.Start()
+			defer server.Close()
+			for range 3 {
+				if _, err := fetch.Subscription(t.Context(), fetch.Request{URL: server.URL}); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-closed:
+				case <-time.After(2 * time.Second):
+					t.Fatal("请求结束后连接仍空闲驻留")
+				}
+			}
+		})
+	}
+}
 
 func TestSubscriptionMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -422,5 +454,48 @@ func TestSubscriptionTLSRequiresExplicitInsecureOption(t *testing.T) {
 	}
 	if len(response.Body) == 0 {
 		t.Fatal("TLS 请求未返回订阅内容")
+	}
+}
+
+func TestSubscriptionRedirectNeverRestoresSensitiveHeaders(t *testing.T) {
+	type observed struct{ token, hwid, auth string }
+	seen := make(chan observed, 2)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- observed{r.Header.Get("X-Vendor-Token"), r.Header.Get("X-HWID"), r.Header.Get("Authorization")}
+		if r.URL.Path == "/first" {
+			http.Redirect(w, r, "/final", http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte("fixture"))
+	}))
+	defer target.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/first", http.StatusFound)
+	}))
+	defer origin.Close()
+	_, err := fetch.Subscription(t.Context(), fetch.Request{URL: origin.URL, HWID: "fixture-hwid", Headers: map[string]string{"X-Vendor-Token": "fixture-token", "Authorization": "Bearer fixture"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, final := <-seen, <-seen
+	t.Logf("cross-origin first=%+v, same-origin next=%+v", first, final)
+	if first != (observed{}) {
+		t.Fatalf("跨域首跳泄露 Header: %+v", first)
+	}
+	if final != (observed{}) {
+		t.Fatalf("sensitive headers returned after a cross-origin redirect: %+v", final)
+	}
+}
+
+func TestSubscriptionRejectsRedirectLoop(t *testing.T) {
+	requests := make(chan struct{}, 20)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- struct{}{}
+		http.Redirect(w, r, "/loop", http.StatusFound)
+	}))
+	defer server.Close()
+	_, err := fetch.Subscription(t.Context(), fetch.Request{URL: server.URL})
+	if _, ok := errors.AsType[*fetch.RedirectError](err); !ok || len(requests) != 10 {
+		t.Fatalf("重定向循环未按安全策略终止: requests=%d err=%v", len(requests), err)
 	}
 }

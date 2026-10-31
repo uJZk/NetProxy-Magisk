@@ -66,7 +66,7 @@ func TestCatalogNodeMutationsCommitPair(t *testing.T) {
 	if len(nodes) != 1 || nodes[0].Tag != "EDITED" {
 		t.Fatalf("unexpected nodes: %+v", nodes)
 	}
-	metadata, err := LoadMetadata(filepath.Join(groupDir, "meta.json"), "local-test")
+	metadata, err := LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), "local-test")
 	if err != nil {
 		t.Fatalf("load metadata: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestCatalogAppendFileKeepsExistingNodesAndNormalizesTags(t *testing.T) {
 			t.Fatalf("node tag %d = %q, want %q", index, nodes[index].Tag, want)
 		}
 	}
-	metadata, err := LoadMetadata(filepath.Join(root, "default", "meta.json"), "default")
+	metadata, err := LoadMetadata(context.Background(), filepath.Join(root, "default", "meta.json"), "default")
 	if err != nil {
 		t.Fatalf("load default metadata: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestCatalogNodeMutationsSerializePerGroup(t *testing.T) {
 	if got := len(provider.Inspect(document)); got != 3 {
 		t.Fatalf("concurrent append lost nodes: got %d", got)
 	}
-	metadata, err := LoadMetadata(filepath.Join(root, "concurrent", "meta.json"), "concurrent")
+	metadata, err := LoadMetadata(context.Background(), filepath.Join(root, "concurrent", "meta.json"), "concurrent")
 	if err != nil {
 		t.Fatalf("load metadata: %v", err)
 	}
@@ -230,13 +230,13 @@ func TestConcurrentNodeEditsWithSubscriptionUpdate(t *testing.T) {
 		defer wait.Done()
 		<-start
 		// 订阅更新在提交阶段持有同一个分组锁，不能和节点编辑交错读写。
-		releaseGroup, acquireErr := Acquire(root, groupID)
+		releaseGroup, acquireErr := Acquire(context.Background(), root, groupID)
 		if acquireErr != nil {
 			errorsCh <- acquireErr
 			return
 		}
 		defer releaseGroup()
-		releaseRoot, acquireErr := AcquireRoot(root)
+		releaseRoot, acquireErr := AcquireRoot(context.Background(), root)
 		if acquireErr != nil {
 			errorsCh <- acquireErr
 			return
@@ -257,7 +257,7 @@ func TestConcurrentNodeEditsWithSubscriptionUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load final provider: %v", err)
 	}
-	finalMetadata, err := LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	finalMetadata, err := LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if err != nil {
 		t.Fatalf("load final metadata: %v", err)
 	}
@@ -297,7 +297,7 @@ func TestCatalogGroupInitialization(t *testing.T) {
 		t.Fatalf("initialize group: %v", err)
 	}
 	groupDir := filepath.Join(root, "subscription-test")
-	metadata, err := LoadMetadata(filepath.Join(groupDir, "meta.json"), "subscription-test")
+	metadata, err := LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), "subscription-test")
 	if err != nil {
 		t.Fatalf("load initialized metadata: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestCatalogGroupInitialization(t *testing.T) {
 	if err := SetGroupName(context.Background(), root, "subscription-test", "更新后的订阅", now); err != nil {
 		t.Fatalf("set group name: %v", err)
 	}
-	metadata, err = LoadMetadata(filepath.Join(groupDir, "meta.json"), "subscription-test")
+	metadata, err = LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), "subscription-test")
 	if err != nil || metadata.Name != "更新后的订阅" {
 		t.Fatalf("unexpected renamed metadata: %v, %+v", err, metadata)
 	}

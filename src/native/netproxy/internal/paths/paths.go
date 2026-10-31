@@ -20,7 +20,11 @@ func New(root string) Layout {
 	if strings.TrimSpace(root) == "" {
 		root = "."
 	}
-	return Layout{moduleRoot: filepath.Clean(root), devRoot: defaultDevRoot}
+	devRoot := os.Getenv("NETPROXY_DEV_ROOT")
+	if devRoot == "" {
+		devRoot = defaultDevRoot
+	}
+	return Layout{moduleRoot: filepath.Clean(root), devRoot: filepath.Clean(devRoot)}
 }
 
 // Default 返回当前模块的默认路径布局。
@@ -51,10 +55,18 @@ func (l Layout) Data() string { return filepath.Join(l.moduleRoot, "data") }
 func (l Layout) Catalog() string { return filepath.Join(l.Data(), "catalog") }
 
 // ModuleConfig 返回模块配置文件路径。
-func (l Layout) ModuleConfig() string { return filepath.Join(l.Config(), "module.conf") }
+func (l Layout) ModuleConfig() string { return filepath.Join(l.Config(), "module.json") }
 
-// EBPFConfig 返回 eBPF 配置文件路径。
-func (l Layout) EBPFConfig() string { return filepath.Join(l.Config(), "ebpf", "ebpf.conf") }
+func (l Layout) APIConfig() string { return filepath.Join(l.Config(), "api.json") }
+
+func (l Layout) APITempDir() string { return filepath.Join(l.DevRoot(), "http") }
+
+func (l Layout) AndroidPlatformDEX() string { return filepath.Join(l.Bin(), "android-platform.dex") }
+
+func (l Layout) AndroidIcons() string { return filepath.Join(l.Data(), "cache", "android-icons") }
+
+// InboundConfig 返回受管入站配置文件路径。
+func (l Layout) InboundConfig() string { return filepath.Join(l.Config(), "inbound", "inbound.json") }
 
 // SingBoxDir 返回 sing-box 静态配置根目录。
 func (l Layout) SingBoxDir() string { return filepath.Join(l.Config(), "singbox") }
@@ -67,6 +79,15 @@ func (l Layout) Logs() string { return filepath.Join(l.moduleRoot, "logs") }
 
 // ModuleProp 返回模块元信息文件路径。
 func (l Layout) ModuleProp() string { return filepath.Join(l.moduleRoot, "module.prop") }
+
+// IsLive 判断当前目录是否为安装后的正式模块，而非安装器暂存目录。
+func (l Layout) IsLive() bool { return l.moduleRoot == "/data/adb/modules/netproxy" }
+
+// TelemetryState 返回不参与配置编辑与日志导出的设备统计状态。
+func (l Layout) TelemetryState() string { return filepath.Join(l.Config(), "telemetry", "state.json") }
+
+// TelemetryLock 返回目录热切换期间仍保持同一 inode 的统计锁。
+func (l Layout) TelemetryLock() string { return filepath.Join(l.DevRoot(), "telemetry.lock.flock") }
 
 // Bin 返回原生二进制目录。
 func (l Layout) Bin() string { return filepath.Join(l.moduleRoot, "bin") }
@@ -98,23 +119,8 @@ func (l Layout) DelayDir() string { return filepath.Join(l.DevRoot(), "delay") }
 // WiFiState 返回 Wi-Fi 自动策略状态文件路径。
 func (l Layout) WiFiState() string { return filepath.Join(l.DevRoot(), "wifi_state") }
 
-// SingBoxConfDir 返回给定 sing-box 配置根目录下的配置片段目录。
-func SingBoxConfDir(singBoxDir string) string { return filepath.Join(singBoxDir, "confdir") }
-
-// SingBoxRawConfig 返回直通模式运行的完整 sing-box 配置。
-func SingBoxRawConfig(singBoxDir string) string { return filepath.Join(singBoxDir, "raw.json") }
-
-// SingBoxRawConfigMeta 返回直通配置的下载状态。
-func SingBoxRawConfigMeta(singBoxDir string) string {
-	return filepath.Join(singBoxDir, "raw.meta.json")
-}
-
-// SingBoxServicesDoc 返回 Service API 静态文档。
-// 直通模式不加载整个 confdir，但必须单独附加这一份：模块只能通过 Service API
-// 判断核心是否就绪，缺了它 waitForServiceReady 会把一次健康的启动判为失败。
-func SingBoxServicesDoc(singBoxDir string) string {
-	return filepath.Join(SingBoxConfDir(singBoxDir), "08_services.json")
-}
+// SingBoxConfig 返回给定 sing-box 配置根目录下的静态主配置。
+func SingBoxConfig(singBoxDir string) string { return filepath.Join(singBoxDir, "config.json") }
 
 // SingBoxRulesDir 返回给定 sing-box 配置根目录下的规则资源目录。
 func SingBoxRulesDir(singBoxDir string) string { return filepath.Join(singBoxDir, "rules") }

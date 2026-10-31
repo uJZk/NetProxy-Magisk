@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalResources
@@ -59,12 +61,11 @@ import com.fanjv.netproxy.core.ui.component.rememberAppSnackbarHostState
 import com.fanjv.netproxy.core.ui.component.rememberBlurBackdrop
 import com.fanjv.netproxy.core.ui.theme.LocalEnableBlur
 import com.fanjv.netproxy.core.ui.theme.isInDarkTheme
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.CircularProgressIndicator
@@ -101,15 +102,37 @@ internal fun SingBoxJsonEditScreen(
     val context = LocalContext.current
     val snackbarHostState = rememberAppSnackbarHostState()
     val resources = LocalResources.current
-    val schemaValidator = remember(context) { SingBoxSchemaValidator(context.applicationContext) }
-    val completionProvider = remember(context) {
-        SingBoxSchemaCompletionProvider(context.applicationContext)
+    val languageTags = LocalConfiguration.current.locales.toLanguageTags()
+    val schemaContext = remember(context, languageTags) {
+        context.createConfigurationContext(resources.configuration)
+    }
+    val schemaSource = remember(context.applicationContext) {
+        val assets = context.applicationContext.assets
+        SingBoxEditorSchema {
+            assets.open("sing-box.schema.json").bufferedReader().use {
+                singBoxSchemaJson.parseToJsonElement(it.readText()).jsonObject
+            }
+        }
+    }
+    val schema = remember(schemaSource, documentId) { schemaSource.forDocument(documentId) }
+    val schemaText = remember(schemaContext) { SchemaText { id, args -> schemaContext.getString(id, *args) } }
+    val schemaValidator = remember(schema, schemaText) { SingBoxSchemaValidator(schema, schemaText) }
+    val completionProvider = remember(schema, schemaText) {
+        SingBoxSchemaCompletionProvider(schema, schemaText)
     }
     val coroutineScope = rememberCoroutineScope()
     var hasLoaded by remember(documentId, controller) {
         mutableStateOf(controller.getText().isNotEmpty() || controller.isModified)
     }
+    // 重建页面后保留草稿的版本，不能用重新读取的版本替旧草稿通过冲突检查。
+    var documentRevision by rememberSaveable(documentId) { mutableStateOf("") }
     var isSaving by remember { mutableStateOf(false) }
+    var formatJob by remember(documentId) { mutableStateOf<Job?>(null) }
+    DisposableEffect(documentId) {
+        onDispose { formatJob?.cancel() }
+    }
+    var showBackendConfirmation by remember { mutableStateOf(false) }
+    var confirmedBackendSwitch by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf("") }
     var schemaIssues by remember { mutableStateOf(emptyList<SingBoxSchemaIssue>()) }
     var showSchemaIssuesDialog by rememberSaveable(documentId) { mutableStateOf(false) }
@@ -123,7 +146,7 @@ internal fun SingBoxJsonEditScreen(
     var contextHelp by remember(documentId) { mutableStateOf<SingBoxSchemaContextHelp?>(null) }
 
     val document = configState.documents.firstOrNull { it.id == documentId }
-    val displayFilename = document?.filename ?: documentId.substringAfterLast('/')
+    val displayFilename = document?.let { documentTitle(it) } ?: documentId.substringAfterLast('/')
     val isEditable = document?.editable ?: !documentId.startsWith("runtime/")
     val usesRootSchema = document?.category != SingBoxDocumentCategory.LocalRule &&
             !documentId.startsWith("singbox/rules/local/")
@@ -145,34 +168,35 @@ internal fun SingBoxJsonEditScreen(
             configState.documentLoadError
         ) return@LaunchedEffect
         controller.setDocument(configState.activeDocumentContent)
+        documentRevision = configState.activeDocumentRevision
         hasLoaded = true
     }
 
     val formatError = stringResource(R.string.json_format_error)
-    val syntaxError = stringResource(R.string.json_syntax_error)
     val savedMessage = stringResource(R.string.json_saved)
-    val canSave = isEditable && hasLoaded && controller.isModified &&
-            !controller.isComposing && !isSaving
+    val canSave = isEditable && hasLoaded && documentRevision.isNotEmpty() && controller.isModified &&
+            !controller.isComposing && !isSaving && !showBackendConfirmation
 
     val documentVersion = controller.documentVersion
     val caret = controller.caret
-    LaunchedEffect(documentVersion, caret, usesRootSchema, hasLoaded) {
+    LaunchedEffect(documentVersion, caret, usesRootSchema, hasLoaded, completionProvider) {
         if (!hasLoaded || !usesRootSchema) {
             contextHelp = null
             return@LaunchedEffect
         }
         delay(CONTEXT_HELP_DEBOUNCE_MS)
         val text = controller.getText()
-        contextHelp = withContext(Dispatchers.Default) {
-            completionProvider.contextHelp(text, caret)
-        }
+        val help = completionProvider.contextHelp(text, caret)
+        ensureActive()
+        if (controller.documentVersion == documentVersion && controller.caret == caret) contextHelp = help
     }
     LaunchedEffect(documentVersion) {
+        formatJob?.cancel()
         saveErrorText = ""
         saveFailureDetail = ""
         showSaveFailureDialog = false
     }
-    LaunchedEffect(documentVersion, hasLoaded, isSaving, usesRootSchema) {
+    LaunchedEffect(documentVersion, hasLoaded, isSaving, usesRootSchema, schemaValidator) {
         errorText = ""
         schemaIssues = emptyList()
         showSchemaIssuesDialog = false
@@ -181,17 +205,10 @@ internal fun SingBoxJsonEditScreen(
 
         delay(VALIDATION_DEBOUNCE_MS)
         val text = controller.getText()
-        if (runCatching { singBoxJson.parseToJsonElement(text).jsonObject }.isFailure) {
-            errorText = syntaxError
-            validationState = EditorValidationState.Invalid
-            return@LaunchedEffect
-        }
-        if (!usesRootSchema) {
-            validationState = EditorValidationState.Valid
-            return@LaunchedEffect
-        }
-
-        when (val result = schemaValidator.validate(text)) {
+        val result = validateEditorJson(text, schemaValidator.takeIf { usesRootSchema }, schemaText)
+        ensureActive()
+        if (controller.documentVersion != documentVersion) return@LaunchedEffect
+        when (result) {
             SingBoxSchemaValidationResult.Valid -> {
                 validationState = EditorValidationState.Valid
             }
@@ -216,24 +233,35 @@ internal fun SingBoxJsonEditScreen(
     }
 
     fun formatDocument() {
-        val formatted = runCatching {
-            singBoxJsonPretty.encodeToString(singBoxJson.parseToJsonElement(controller.getText()))
-        }.getOrNull()
-        if (formatted == null) {
-            errorText = formatError
-            return
+        formatJob?.cancel()
+        val version = controller.documentVersion
+        val text = controller.getText()
+        formatJob = coroutineScope.launch {
+            val formatted = try {
+                formatEditorJson(parseEditorJson(text))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: IllegalArgumentException) {
+                if (controller.documentVersion == version) errorText = formatError
+                return@launch
+            }
+            ensureActive()
+            if (controller.documentVersion != version || controller.isComposing || isSaving) return@launch
+            controller.replaceRange(
+                TextPosition(0, 0),
+                TextPosition(Int.MAX_VALUE, Int.MAX_VALUE),
+                formatted,
+            )
         }
-        controller.replaceRange(
-            TextPosition(0, 0),
-            TextPosition(Int.MAX_VALUE, Int.MAX_VALUE),
-            formatted,
-        )
     }
 
     fun saveDocument() {
+        val confirmed = confirmedBackendSwitch
+        confirmedBackendSwitch = false
         val version = controller.documentVersion
+        val expectedRevision = documentRevision
         val text = controller.getText(controller.lineEnding)
-        val parsed = parseJsonObjectOrError(text) { errorText = it } ?: return
+        formatJob?.cancel()
         saveErrorText = ""
         saveFailureDetail = ""
         showSaveFailureDialog = false
@@ -241,13 +269,22 @@ internal fun SingBoxJsonEditScreen(
 
         val onComplete: (SingBoxDocumentSaveResult) -> Unit = { result ->
             isSaving = false
-            if (result.success) {
+            if (result.confirmationRequired) {
+                showBackendConfirmation = true
+            } else if (result.success) {
+                documentRevision = result.revision
                 controller.markSaved(version)
                 coroutineScope.launch {
                     snackbarHostState.showSnackbar(savedMessage)
                 }
             } else {
-                saveErrorText = if (result.restored) {
+                saveErrorText = if (result.errorCode == "config.conflict") {
+                    resources.getString(R.string.inbound_conflict)
+                } else if (result.errorCode == "inbound.not_confirmed") {
+                    resources.getString(R.string.inbound_apply_unconfirmed)
+                } else if (result.errorCode == "inbound.restart_required") {
+                    resources.getString(R.string.inbound_restart_required)
+                } else if (result.restored) {
                     resources.getString(R.string.json_save_rolled_back)
                 } else {
                     resources.getString(R.string.json_save_failed_summary)
@@ -261,38 +298,55 @@ internal fun SingBoxJsonEditScreen(
         }
 
         coroutineScope.launch {
-            val validationResult = if (!usesRootSchema) {
-                SingBoxSchemaValidationResult.Valid
-            } else {
-                schemaValidator.validate(text)
-            }
-            when (val result = validationResult) {
-                SingBoxSchemaValidationResult.Valid -> {
-                    viewModel.saveDocument(
-                        documentId,
-                        singBoxJsonPretty.encodeToString(parsed),
-                        onComplete,
-                    )
-                }
-
-                is SingBoxSchemaValidationResult.Invalid -> {
-                    isSaving = false
-                    schemaIssues = result.issues
-                    errorText = resources.getString(
-                        R.string.json_schema_invalid,
-                        result.issues.size,
-                    )
+            var submitted = false
+            try {
+                val parsed = try {
+                    parseEditorJson(text)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: IllegalArgumentException) {
+                    errorText = error.message ?: formatError
                     validationState = EditorValidationState.Invalid
+                    return@launch
                 }
+                val validationResult = if (usesRootSchema) schemaValidator.validate(text, parsed)
+                    else SingBoxSchemaValidationResult.Valid
+                ensureActive()
+                if (controller.documentVersion != version) return@launch
+                when (val result = validationResult) {
+                    SingBoxSchemaValidationResult.Valid -> {
+                        val formatted = formatEditorJson(parsed)
+                        ensureActive()
+                        if (controller.documentVersion != version) return@launch
+                        viewModel.saveDocument(
+                            documentId,
+                            formatted,
+                            expectedRevision,
+                            confirmBackendSwitch = confirmed,
+                            onComplete,
+                        )
+                        submitted = true
+                    }
 
-                is SingBoxSchemaValidationResult.Unavailable -> {
-                    isSaving = false
-                    errorText = resources.getString(
-                        R.string.json_schema_unavailable,
-                        result.reason,
-                    )
-                    validationState = EditorValidationState.Unavailable
+                    is SingBoxSchemaValidationResult.Invalid -> {
+                        schemaIssues = result.issues
+                        errorText = resources.getString(
+                            R.string.json_schema_invalid,
+                            result.issues.size,
+                        )
+                        validationState = EditorValidationState.Invalid
+                    }
+
+                    is SingBoxSchemaValidationResult.Unavailable -> {
+                        errorText = resources.getString(
+                            R.string.json_schema_unavailable,
+                            result.reason,
+                        )
+                        validationState = EditorValidationState.Unavailable
+                    }
                 }
+            } finally {
+                if (!submitted) isSaving = false
             }
         }
     }
@@ -441,12 +495,12 @@ internal fun SingBoxJsonEditScreen(
                         controller = controller,
                         language = EditorLanguage.PlainText,
                         colors = if (isInDarkTheme()) EditorColors.Default else EditorColors.Light,
-                        readOnly = !isEditable || !hasLoaded || isSaving,
+                        readOnly = !isEditable || !hasLoaded || isSaving || showBackendConfirmation,
                         softWrap = softWrap,
                         symbols = JsonEditorSymbols,
                         symbolBarPosition = SymbolBarPosition.End,
                         bottomBar = { colors ->
-                            val toolbarEnabled = hasLoaded && !isSaving
+                            val toolbarEnabled = hasLoaded && !isSaving && !showBackendConfirmation
                             EditorActionBar(
                                 colors = colors,
                                 actions = listOf(
@@ -511,6 +565,31 @@ internal fun SingBoxJsonEditScreen(
                     )
                 }
             }
+        }
+    }
+
+    OverlayDialog(
+        show = showBackendConfirmation,
+        title = stringResource(R.string.inbound_switch_title),
+        summary = stringResource(R.string.inbound_switch_warning),
+        onDismissRequest = { showBackendConfirmation = false },
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            TextButton(
+                text = stringResource(android.R.string.cancel),
+                onClick = { showBackendConfirmation = false },
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                text = stringResource(R.string.save_text),
+                onClick = {
+                    showBackendConfirmation = false
+                    confirmedBackendSwitch = true
+                    saveDocument()
+                },
+                modifier = Modifier.weight(1f),
+                colors = ButtonDefaults.textButtonColorsPrimary(),
+            )
         }
     }
 
@@ -682,15 +761,6 @@ private fun EditorActionKey(
     }
 }
 
-private val singBoxJson = Json {
-    ignoreUnknownKeys = true
-    isLenient = true
-}
-
-private val singBoxJsonPretty = Json(singBoxJson) {
-    prettyPrint = true
-}
-
 private enum class EditorValidationState {
     Checking,
     Valid,
@@ -711,9 +781,3 @@ private val JsonEditorSymbols = listOf(
     EditorSymbol(":"),
     EditorSymbol(","),
 )
-
-private fun parseJsonObjectOrError(rawJson: String, onError: (String) -> Unit): JsonObject? =
-    runCatching { singBoxJson.parseToJsonElement(rawJson).jsonObject }.getOrElse {
-        onError(it.message ?: "Invalid JSON")
-        null
-    }

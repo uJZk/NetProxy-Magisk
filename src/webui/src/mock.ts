@@ -1,4 +1,4 @@
-import { CONTRACT_SCHEMA, type CtlResult, type ExecResult } from './contract'
+import { CONTRACT_SCHEMA, type CtlResult, type ExecResult, type InboundBackend, type ServiceBackendStatus } from './contract.ts'
 
 const GROUP_DEFAULTS = {
   auto_update: false,
@@ -22,7 +22,68 @@ const GROUPS = [
 
 const NODE = { tag: 'demo-node', protocol: 'socks', server: 'example.test', port: 1080 }
 let serviceState = 'stopped'
-let outboundMode = 'rule'
+const availableModes = ['Proxy', 'RuleAllowAds', 'Rule', 'Direct']
+let outboundMode = 'Rule'
+let runtimePrepared = false
+
+const MODULE_CONFIG = {
+  auto_start: false,
+  selection: { group_id: 'default', node_tag: '' },
+  wifi: { enabled: false, mode: 'blacklist', blacklist: [] as string[], whitelist: [] as string[], proxy_on_non_wifi: true },
+}
+
+const INBOUND_CONFIG = {
+  backend: 'ebpf' as InboundBackend,
+  root_policy: 'include',
+  app: { enabled: false, mode: 'blacklist', proxy_apps: [] as string[], bypass_apps: [] as string[] },
+  ebpf: {
+    type: 'ebpf', tag: 'netproxy-in', network: ['tcp', 'udp'], udp_timeout: '5m', tc_priority: 1,
+    local: {
+      enabled: true, data_plane: 'socket_assign', dns_mode: 'respect_policy', ipv6: true,
+      bypass_private_address: true, bypass_rule_set: ['geoip/cn'],
+    },
+    shared: {
+      enabled: false, data_plane: 'socket_assign', dns_mode: 'hijack', interface: ['wlan2'],
+      ipv6: true, bypass_private_address: true, bypass_rule_set: ['geoip/cn'],
+    },
+  },
+  tun: {
+    type: 'tun', tag: 'netproxy-in', interface_name: 'netproxy',
+    address: ['172.19.0.1/30', 'fdfe:dcba:9876::1/126'],
+    auto_route: true, auto_redirect: true, dns_mode: 'hijack',
+  },
+}
+
+const STATIC_CONFIG: Record<string, unknown> = {
+  log: { level: 'info' },
+  dns: { final: 'dns-proxy' },
+  inbounds: [],
+  route: { final: 'Proxy' },
+  experimental: {},
+  http_clients: [],
+  services: [],
+}
+
+const MODULE_DOCUMENTS = [
+  { id: 'module', filename: 'module.json', category: 'module', editable: true },
+  ...['wifi', 'auto_start'].map(section => ({
+    id: `module/${section}`, filename: section, category: 'module', editable: true, section,
+  })),
+]
+
+const CONFIG_DOCUMENTS = [
+  { id: 'inbound', filename: 'inbound.json', category: 'inbound', editable: true },
+  ...['backend', 'root_policy', 'app', 'ebpf', 'tun'].map(section => ({
+    id: `inbound/${section}`, filename: section, category: 'inbound', editable: true, section,
+  })),
+  { id: 'singbox/config.json', filename: 'config.json', category: 'config', editable: true },
+  ...[...Object.keys(STATIC_CONFIG), 'outbounds'].map(section => ({
+    id: `singbox/${section}`, filename: section, category: 'config', editable: true, section,
+  })),
+  ...['inbound.json', 'providers.json', 'outbounds.json'].map(filename => ({
+    id: `runtime/${filename}`, filename, category: 'runtime', editable: false,
+  })),
+]
 
 function response<T>(code: string, message: string, data?: T): CtlResult<T> {
   return { schema: CONTRACT_SCHEMA, ok: true, code, message, ...(data === undefined ? {} : { data }) }
@@ -33,21 +94,28 @@ function failure(code: string, message: string): CtlResult<Record<string, never>
 }
 
 function serviceStatus() {
+  const backendStatus: ServiceBackendStatus = {
+    configured_backend: INBOUND_CONFIG.backend,
+    active_backend: serviceState === 'ready' ? INBOUND_CONFIG.backend : null,
+  }
   return {
     state: serviceState,
-    pid: null,
-    started_at: serviceState === 'ready' ? 1_700_000_000_000 : 0,
-    ready_at: serviceState === 'ready' ? 1_700_000_005_000 : 0,
+    pid: serviceState === 'ready' ? 4242 : null,
+    started_at: serviceState === 'ready' ? 1_700_000_000 : 0,
+    ready_at: serviceState === 'ready' ? 1_700_000_005 : 0,
     uptime_seconds: serviceState === 'ready' ? 120 : 0,
     error: '',
     outbound_mode: outboundMode,
     configured_outbound_mode: outboundMode,
+    available_outbound_modes: availableModes,
+    ...backendStatus,
     selector_mode: 'urltest',
     active_group_id: 'default',
     active_group_name: '本地配置',
+    active_group_runtime_tag: '本地配置',
     active_group_node_count: 1,
     selected_node_ref: '',
-    runtime_selected: 'Auto/本地配置',
+    runtime_selected: serviceState === 'ready' ? '本地配置/demo-node' : '',
     memory_bytes: 0,
     process_cpu_ticks: 0,
     system_cpu_ticks: 0,
@@ -74,7 +142,7 @@ function selection() {
     selector_mode: 'urltest',
     selected_node_ref: '',
     selected: 'Auto/本地配置',
-    runtime_selected: 'Auto/本地配置',
+    runtime_selected: serviceState === 'ready' ? '本地配置/demo-node' : '',
   }
 }
 
@@ -98,8 +166,19 @@ function execute(args: string[]): CtlResult<unknown> {
   const command = clean[0]
   const action = clean[1]
 
+  if (command === 'api') {
+    if (action === 'access') return failure('api.preview_unavailable', '开发预览不提供真实连接凭据')
+    if (action === 'init') return response('api.initialized', '管理接口凭据已初始化', { listen: '127.0.0.1:9091' })
+    if (action === 'start') return failure('api.preview_unavailable', '开发预览不会启动 HTTP 管理服务')
+    if (action === 'status') return response('api.status', '模块管理接口状态', { state: 'unavailable', listen: '127.0.0.1:9091' })
+    return failure('usage.invalid', '用法: api init|start|status|access')
+  }
+
   if (command === 'service') {
-    if (action === 'start' || action === 'restart') serviceState = 'ready'
+    if (action === 'start' || action === 'restart') {
+      serviceState = 'ready'
+      runtimePrepared = true
+    }
     if (action === 'stop') serviceState = 'stopped'
     if (action === 'status') return response('service.status', '服务状态', serviceStatus())
     return response(`service.${action || 'status'}`, '服务操作完成', { action, status: serviceStatus() })
@@ -124,13 +203,21 @@ function execute(args: string[]): CtlResult<unknown> {
   }
 
   if (command === 'mode') {
-    if (!action) return response('mode.current', '当前出站模式', { mode: outboundMode, available: ['rule', 'global', 'direct', 'AllowAds'] })
+    if (!action) return response('mode.current', '当前出站模式', { mode: outboundMode, available: availableModes })
+    if (!availableModes.includes(action)) return failure('mode.invalid', '配置中不存在出站模式: ' + action)
     outboundMode = action
     return response('mode.changed', '出站模式已切换', { mode: outboundMode })
   }
 
   if (command === 'app' && action === 'list') {
-    return response('app.list', '分应用代理配置', { enabled: false, mode: 'blacklist', proxy_apps: '', bypass_apps: '' })
+    return response('app.list', '分应用代理配置', {
+      enabled: INBOUND_CONFIG.app.enabled, mode: INBOUND_CONFIG.app.mode,
+      proxy_apps: INBOUND_CONFIG.app.proxy_apps.join(','), bypass_apps: INBOUND_CONFIG.app.bypass_apps.join(','),
+    })
+  }
+
+  if (command === 'network' && action === 'wifi-list') {
+    return response('network.wifi_list', '已读取保存的 Wi-Fi 名称', { ssids: ['Home Wi-Fi', 'Office'] })
   }
 
   if (command === 'network' && action === 'evaluate') {
@@ -146,11 +233,55 @@ function execute(args: string[]): CtlResult<unknown> {
   }
 
   if (command === 'ebpf' && action === 'status') {
-    return response('ebpf.status', 'eBPF 能力诊断', { mode: clean[2] || 'configured', summary: '开发预览 mock' })
+    const requestedMode = clean.slice(2).find(arg => arg !== '--raw') || 'configured'
+    const raw = clean.includes('--raw')
+    const reportMode = requestedMode === 'configured' ? 'local' : requestedMode
+    const localDataPlane = reportMode === 'local' || reportMode === 'all' ? INBOUND_CONFIG.ebpf.local.data_plane : undefined
+    const sharedDataPlane = reportMode === 'shared' || reportMode === 'all' ? INBOUND_CONFIG.ebpf.shared.data_plane : undefined
+    const report = {
+      platform: 'android',
+      kernel_release: 'mock',
+      architecture: 'arm64',
+      mode: reportMode,
+      ...(localDataPlane ? { local_data_plane: localDataPlane } : {}),
+      ...(sharedDataPlane ? { shared_data_plane: sharedDataPlane } : {}),
+      network: ['tcp', 'udp'],
+      ipv6: true,
+      findings: [],
+      preflight: true,
+      exact_object_load: true,
+      summary: { pass: 1, warn: 0, fail: 0, unknown: 0, required_failures: 0, required_unknowns: 0, required_issues: 0 },
+      result: 'preflight_passed',
+    }
+    return response('ebpf.status', 'eBPF 能力检查完成', {
+      mode: requestedMode,
+      raw,
+      content: raw ? JSON.stringify(report, null, 2) : '结论: eBPF 能力预检通过\n尚未验证实际挂载与网络接管。',
+      report,
+    })
   }
 
   if (command === 'config' && action === 'list') {
-    return response('config.list', 'sing-box 配置列表', [])
+    const documents = runtimePrepared ? CONFIG_DOCUMENTS : CONFIG_DOCUMENTS.filter(item => item.category !== 'runtime')
+    return response('config.list', '配置列表', documents)
+  }
+  if (command === 'config' && action === 'read') {
+    const document = [...MODULE_DOCUMENTS, ...CONFIG_DOCUMENTS].find(item => item.id === clean[2])
+    if (!document) return failure('command.failed', '不支持的配置目标')
+    if (document.category === 'runtime' && !runtimePrepared) return failure('command.failed', '尚未生成运行时配置')
+    let content: unknown = {}
+    if (document.id === 'module') content = MODULE_CONFIG
+    else if (document.category === 'module') content = { [document.filename]: MODULE_CONFIG[document.filename as keyof typeof MODULE_CONFIG] }
+    else if (document.id === 'inbound') content = INBOUND_CONFIG
+    else if (document.category === 'inbound') content = { [document.filename]: INBOUND_CONFIG[document.filename as keyof typeof INBOUND_CONFIG] }
+    else if (document.id === 'runtime/inbound.json') content = { inbounds: [{ ...INBOUND_CONFIG.ebpf, shared: { enabled: false } }] }
+    else if (document.id === 'runtime/providers.json') content = { providers: [] }
+    else if (document.id === 'runtime/outbounds.json') content = { outbounds: [] }
+    else if (document.id === 'singbox/config.json') content = STATIC_CONFIG
+    else if (Object.prototype.hasOwnProperty.call(STATIC_CONFIG, document.filename)) content = { [document.filename]: STATIC_CONFIG[document.filename] }
+    return response('config.read', '配置内容', {
+      target: document.id, content: JSON.stringify(content, null, 2), revision: `mock-${document.filename}-1`,
+    })
   }
 
   if (command === 'logs' && action === 'show') {

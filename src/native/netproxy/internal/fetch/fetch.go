@@ -28,7 +28,7 @@ const maxSubscriptionSize = 20 << 20
 // 不带内核版本号，避免内核升级后 UA 失真。
 const defaultUserAgent = "sing-box"
 
-// Android may leave resolv.conf pointing at a loopback DNS listener owned by the stopped core.
+// Android 的纯 Go DNS 可能指向未监听的 loopback；直连 HTTP 请求共用备用解析。
 var fallbackDNSServers = []string{
 	"223.5.5.5:53",
 	"119.29.29.29:53",
@@ -102,7 +102,7 @@ func Subscription(ctx context.Context, request Request) (Response, error) {
 	}
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           subscriptionDialContext,
+		DialContext:           DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          16,
 		IdleConnTimeout:       90 * time.Second,
@@ -113,6 +113,7 @@ func Subscription(ctx context.Context, request Request) (Response, error) {
 			InsecureSkipVerify: request.AllowInsecure, // Explicit user option.
 		},
 	}
+	defer transport.CloseIdleConnections()
 	if request.ProxyURL != "" {
 		proxyURL, err := url.Parse(request.ProxyURL)
 		if err != nil {
@@ -121,11 +122,9 @@ func Subscription(ctx context.Context, request Request) (Response, error) {
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 	client := &http.Client{
-		Transport: transport,
-		Timeout:   request.Timeout,
-		CheckRedirect: func(redirectRequest *http.Request, via []*http.Request) error {
-			return checkSubscriptionRedirect(redirectRequest, via)
-		},
+		Transport:     transport,
+		Timeout:       request.Timeout,
+		CheckRedirect: checkSubscriptionRedirect,
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, request.URL, nil)
 	if err != nil {
@@ -175,14 +174,15 @@ func Subscription(ctx context.Context, request Request) (Response, error) {
 	return Response{Body: body, Metadata: metadata}, nil
 }
 
-func subscriptionDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+// DialContext 为 HTTP 请求共用系统与备用 DNS 解析，保留调用方的取消和截止时间。
+func DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
 	host, port, err := net.SplitHostPort(address)
 	if err != nil || net.ParseIP(host) != nil {
 		return dialer.DialContext(ctx, network, address)
 	}
 
-	addresses, err := lookupIPAddresses(ctx, host, subscriptionResolvers())
+	addresses, err := lookupIPAddresses(ctx, host, httpResolvers())
 	if err != nil {
 		return nil, err
 	}
@@ -207,6 +207,9 @@ func checkSubscriptionRedirect(request *http.Request, via []*http.Request) error
 	if !isHTTPSubscriptionScheme(request.URL.Scheme) {
 		return &RedirectError{Reason: "重定向目标协议不受支持"}
 	}
+	if len(via) >= 10 {
+		return &RedirectError{Reason: "重定向次数超过限制"}
+	}
 	if len(via) == 0 {
 		return nil
 	}
@@ -217,8 +220,12 @@ func checkSubscriptionRedirect(request *http.Request, via []*http.Request) error
 	if strings.EqualFold(previous.URL.Scheme, "https") && strings.EqualFold(request.URL.Scheme, "http") {
 		return &RedirectError{Reason: "禁止 HTTPS 降级到 HTTP"}
 	}
-	if !sameSubscriptionOrigin(previous.URL, request.URL) {
-		stripRedirectHeaders(request)
+	// net/http 每一跳都可能从初始请求复制 Header，跨域后的同源跳转也必须清除。
+	for _, source := range via {
+		if source == nil || !sameSubscriptionOrigin(source.URL, request.URL) {
+			stripRedirectHeaders(request)
+			break
+		}
 	}
 	return nil
 }
@@ -261,7 +268,7 @@ func stripRedirectHeaders(request *http.Request) {
 	}
 }
 
-func subscriptionResolvers() []ipResolver {
+func httpResolvers() []ipResolver {
 	resolvers := []ipResolver{net.DefaultResolver}
 	for _, server := range fallbackDNSServers {
 		resolvers = append(resolvers, &net.Resolver{

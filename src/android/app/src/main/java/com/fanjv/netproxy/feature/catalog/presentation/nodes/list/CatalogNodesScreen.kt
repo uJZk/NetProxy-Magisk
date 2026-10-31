@@ -36,7 +36,6 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -50,6 +49,7 @@ import com.fanjv.netproxy.R
 import com.fanjv.netproxy.core.di.netProxyViewModel
 import com.fanjv.netproxy.core.ui.component.AppSnackbarHost
 import com.fanjv.netproxy.core.ui.component.BlurredBar
+import com.fanjv.netproxy.core.ui.component.ContentStatus
 import com.fanjv.netproxy.core.ui.component.SnackbarNoticeEffect
 import com.fanjv.netproxy.core.ui.component.TopBarMenuAction
 import com.fanjv.netproxy.core.ui.component.TopBarMoreMenu
@@ -60,9 +60,9 @@ import com.fanjv.netproxy.core.ui.resolve
 import com.fanjv.netproxy.feature.catalog.model.CatalogNode
 import com.fanjv.netproxy.feature.catalog.model.CatalogNodeGroup
 import com.fanjv.netproxy.feature.catalog.presentation.nodes.CatalogNodesViewModel
+import com.fanjv.netproxy.feature.catalog.presentation.nodes.selectedAutoNodeTag
 import com.fanjv.netproxy.feature.catalog.presentation.nodes.list.components.CatalogGroupList
 import com.fanjv.netproxy.feature.catalog.presentation.nodes.list.components.CatalogNodeGrid
-import com.fanjv.netproxy.feature.catalog.presentation.nodes.list.components.EmptyState
 import com.fanjv.netproxy.feature.catalog.presentation.nodes.list.components.FilterBar
 import com.fanjv.netproxy.navigation.LocalNavigator
 import com.fanjv.netproxy.navigation.Route.NodeEdit
@@ -71,7 +71,6 @@ import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
-import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.Scaffold
@@ -95,6 +94,11 @@ internal fun CatalogNodesScreen(
     viewModel: CatalogNodesViewModel = netProxyViewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val selectedAutoNode = remember(state.groups, state.selection) {
+        state.groups.firstOrNull { it.group.id == state.selection.activeGroupId }
+            ?.let { selectedAutoNodeTag(it, state.selection) }
+            .orEmpty()
+    }
     val navigator = LocalNavigator.current
     val context = LocalContext.current
     val scrollBehavior = MiuixScrollBehavior()
@@ -247,24 +251,11 @@ internal fun CatalogNodesScreen(
             when {
                 !isActive && state.groups.isEmpty() -> Unit
 
-                state.loading && state.groups.isEmpty() -> InfiniteProgressIndicator(
-                    modifier = Modifier.align(Alignment.Center)
-                )
-
-                state.error !is UiText.Empty && state.groups.isEmpty() -> EmptyState(
-                    text = state.error.resolve(),
-                    onRefresh = { viewModel.refresh() },
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .padding(horizontal = 24.dp)
-                )
-
-                selectedGroup == null -> EmptyState(
-                    text = stringResource(R.string.node_empty),
-                    onRefresh = null,
-                    modifier = Modifier
-                        .align(Alignment.Center)
-                        .padding(horizontal = 24.dp)
+                selectedGroup == null -> ContentStatus(
+                    padding = PaddingValues(top = innerPadding.calculateTopPadding(),
+                        bottom = innerPadding.calculateBottomPadding() + bottomPadding),
+                    text = stringResource(if (state.loadFailed) R.string.nodes_read_failed else R.string.node_empty),
+                    loading = state.loading,
                 )
 
                 else -> PullToRefresh(
@@ -293,6 +284,7 @@ internal fun CatalogNodesScreen(
                             activeGroupId = state.selection.activeGroupId,
                             selectedRef = state.selection.selected,
                             selectorMode = state.selection.selectorMode,
+                            runtimeSelectedNode = selectedAutoNode,
                             latencies = state.latencies,
                             busy = state.operation.isNotEmpty(),
                             columns = layoutDensity + 1,
@@ -311,6 +303,7 @@ internal fun CatalogNodesScreen(
                             activeGroupId = state.selection.activeGroupId,
                             selectedRef = state.selection.selected,
                             selectorMode = state.selection.selectorMode,
+                            runtimeSelectedNode = selectedAutoNode,
                             latencies = state.latencies,
                             busy = state.operation.isNotEmpty(),
                             columns = layoutDensity + 1,

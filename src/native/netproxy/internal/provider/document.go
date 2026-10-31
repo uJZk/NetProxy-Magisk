@@ -117,6 +117,9 @@ func MarshalAllowEmpty(ctx context.Context, document Document) ([]byte, error) {
 }
 
 func marshalDocument(ctx context.Context, document Document) ([]byte, error) {
+	if document.Outbounds == nil {
+		document.Outbounds = []option.Outbound{}
+	}
 	content, err := SJSON.MarshalContext(Context(ctx), document)
 	if err != nil {
 		return nil, err

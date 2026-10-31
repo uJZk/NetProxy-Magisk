@@ -28,11 +28,10 @@ import (
 const retryDelay = 15 * time.Minute
 
 // Meta 保存直通配置的下载状态。
-// 用户设置（URL、周期、User-Agent）的事实源是 module.conf，这里只记录下载簿记，
-// 避免同一项设置出现两个可写副本。
+// 这里只记录下载簿记，不作为用户设置的事实源。
 type Meta struct {
 	Schema int `json:"schema"`
-	// URL 记录这批缓存校验值取自哪个地址，不是设置的事实源（那仍是 module.conf）。
+	// URL 记录这批缓存校验值取自哪个地址，不是设置的事实源。
 	// 换了地址还沿用旧的 ETag，服务端可能回 304，于是配置没换但用户以为换了。
 	URL             string `json:"url"`
 	ETag            string `json:"etag"`
@@ -74,11 +73,10 @@ type Result struct {
 }
 
 // SingBoxValidator 返回用 sing-box 校验候选配置的校验器。
-// 必须带上 Service API 文档：直通模式按同样的组合运行，只检查候选文件会漏掉
-// 用户配置与 Service API 监听端口冲突这类只在合并后才出现的错误。
-func SingBoxValidator(singBoxPath, singBoxDir, servicesPath string) func(context.Context, string) error {
+// 直通模式只加载用户的完整配置，校验时使用相同的文件组合。
+func SingBoxValidator(singBoxPath, singBoxDir string) func(context.Context, string) error {
 	return func(ctx context.Context, candidate string) error {
-		command := exec.CommandContext(ctx, singBoxPath, "check", "-c", candidate, "-c", servicesPath)
+		command := exec.CommandContext(ctx, singBoxPath, "check", "-c", candidate)
 		command.Dir = singBoxDir
 		output, err := command.CombinedOutput()
 		if err != nil {
@@ -116,7 +114,7 @@ func SaveMeta(path string, meta Meta) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(path, append(content, '\n'), 0o600)
+	return writeAtomic(path, append(content, '\n'))
 }
 
 // Due 判断直通配置是否到达自动更新时间。
@@ -209,6 +207,10 @@ func Update(ctx context.Context, options Options) (Result, error) {
 	if err := options.Validate(ctx, candidate); err != nil {
 		return Result{}, options.fail(meta, now, fmt.Errorf("sing-box 检查未通过: %w", err))
 	}
+	previous, previousErr := os.ReadFile(options.ConfigPath)
+	if previousErr != nil && !errors.Is(previousErr, os.ErrNotExist) {
+		return Result{}, options.fail(meta, now, previousErr)
+	}
 	if err := os.Rename(candidate, options.ConfigPath); err != nil {
 		return Result{}, options.fail(meta, now, err)
 	}
@@ -221,7 +223,13 @@ func Update(ctx context.Context, options Options) (Result, error) {
 	meta.LastError = ""
 	options.schedule(&meta, now, options.Interval)
 	if err := SaveMeta(options.MetaPath, meta); err != nil {
-		return Result{}, err
+		var rollbackErr error
+		if errors.Is(previousErr, os.ErrNotExist) {
+			rollbackErr = os.Remove(options.ConfigPath)
+		} else {
+			rollbackErr = writeAtomic(options.ConfigPath, previous)
+		}
+		return Result{}, errors.Join(err, rollbackErr)
 	}
 	return Result{
 		StatusCode: meta.LastStatusCode, Bytes: meta.Bytes,
@@ -256,9 +264,6 @@ func (options Options) schedule(meta *Meta, now time.Time, interval time.Duratio
 
 // CheckDocument 只做廉价的结构预检，协议层校验交给 sing-box。
 // 机场故障时常返回 HTML 错误页并带 200，先在这里拦掉能给出可读得多的原因。
-//
-// 入站非空是硬性要求：直通模式模块不再生成 eBPF 入站，一份没有入站的配置能
-// 通过 sing-box check、能正常 ready，但一个连接都不会被代理，日志里也没有错误。
 func CheckDocument(body []byte) error {
 	trimmed := strings.TrimSpace(string(body))
 	if trimmed == "" {
@@ -267,15 +272,10 @@ func CheckDocument(body []byte) error {
 	if !strings.HasPrefix(trimmed, "{") {
 		return errors.New("下载内容不是 sing-box 配置对象")
 	}
-	var shape struct {
-		Inbounds []SJSON.RawMessage `json:"inbounds"`
-	}
+	var shape map[string]SJSON.RawMessage
 	// 用 sing 的解码器，保留 sing-box 配置允许的注释。
 	if err := SJSON.Unmarshal(body, &shape); err != nil {
 		return fmt.Errorf("配置不是合法 JSON: %w", err)
-	}
-	if len(shape.Inbounds) == 0 {
-		return errors.New("配置里没有任何 inbound，代理不会生效；请在配置中声明入站（模块的透明代理入站类型为 ebpf）")
 	}
 	return nil
 }
@@ -308,7 +308,7 @@ func finishCandidate(file *os.File, body []byte) error {
 	return file.Sync()
 }
 
-func writeAtomic(path string, content []byte, mode os.FileMode) error {
+func writeAtomic(path string, content []byte) error {
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
@@ -319,10 +319,6 @@ func writeAtomic(path string, content []byte, mode os.FileMode) error {
 	}
 	temporary := file.Name()
 	if err := finishCandidate(file, content); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	if err := os.Chmod(temporary, mode); err != nil {
 		_ = os.Remove(temporary)
 		return err
 	}

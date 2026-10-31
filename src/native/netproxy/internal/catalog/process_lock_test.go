@@ -19,6 +19,27 @@ import (
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/provider"
 )
 
+func TestCatalogReadersRespectCancellation(t *testing.T) {
+	root := t.TempDir()
+	release, err := AcquireRoot(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(t.Context(), 40*time.Millisecond)
+	defer cancel()
+	if _, err := Scan(ctx, ScanOptions{Root: root}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("读取未响应超时: %v", err)
+	}
+	path, err := catalogLockPath(root, "root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Size() != 0 {
+		t.Fatalf("锁文件仍写入无用内容: %v %v", info, err)
+	}
+}
+
 const catalogHelperEnv = "NETPROXY_CATALOG_HELPER"
 
 func TestCatalogProcessHelper(t *testing.T) {
@@ -60,7 +81,7 @@ func TestCatalogProcessHelper(t *testing.T) {
 			t.Fatal(err)
 		}
 	case "hold-root":
-		release, err := AcquireRoot(root)
+		release, err := AcquireRoot(context.Background(), root)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -77,12 +98,12 @@ func TestCatalogProcessHelper(t *testing.T) {
 		}
 		defer func() { transactionRenameHook = func(string) {} }()
 		providerContent, metadataContent := helperTransactionContents(t, groupID)
-		if err := CommitPair(root, filepath.Join(root, groupID), providerContent, metadataContent); err != nil {
+		if err := CommitPair(context.Background(), root, filepath.Join(root, groupID), providerContent, metadataContent); err != nil {
 			t.Fatal(err)
 		}
 	case "recover":
 		writeCatalogSignal(t, os.Getenv("NETPROXY_CATALOG_ATTEMPT"))
-		if err := Recover(root); err != nil {
+		if err := Recover(context.Background(), root); err != nil {
 			t.Fatal(err)
 		}
 	case "crash":
@@ -92,7 +113,7 @@ func TestCatalogProcessHelper(t *testing.T) {
 				panic("simulated interruption at " + current)
 			}
 		}
-		if err := CommitPair(root, filepath.Join(root, groupID), []byte("new-provider"), []byte("new-meta")); err != nil {
+		if err := CommitPair(context.Background(), root, filepath.Join(root, groupID), []byte("new-provider"), []byte("new-meta")); err != nil {
 			t.Fatal(err)
 		}
 	default:
@@ -136,7 +157,7 @@ func TestCatalogMultiProcessMixedMutations(t *testing.T) {
 	if len(nodes) != 6 || !hasCatalogTag(nodes, "BASE") || !hasCatalogTag(nodes, "EDITED") || hasCatalogTag(nodes, "REMOVE_ME") {
 		t.Fatalf("mixed mutations lost or duplicated nodes: %+v", nodes)
 	}
-	metadata, err := LoadMetadata(filepath.Join(root, groupID, "meta.json"), groupID)
+	metadata, err := LoadMetadata(context.Background(), filepath.Join(root, groupID, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +187,7 @@ func TestCatalogMultiProcessSameGroupWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	nodes := provider.Inspect(document)
-	metadata, err := LoadMetadata(filepath.Join(root, groupID, "meta.json"), groupID)
+	metadata, err := LoadMetadata(context.Background(), filepath.Join(root, groupID, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +260,7 @@ func TestCatalogRecoverAfterEachRenameInterruption(t *testing.T) {
 			if err := waitCatalogCommand(command); err == nil {
 				t.Fatal("crash helper unexpectedly succeeded")
 			}
-			if err := Recover(root); err != nil {
+			if err := Recover(context.Background(), root); err != nil {
 				t.Fatalf("recover after %s: %v", point, err)
 			}
 			document, err := provider.Load(context.Background(), filepath.Join(groupDir, "provider.json"))
@@ -265,7 +286,7 @@ func TestCatalogStaleOwnerAndPIDReuseDoNotBypassFileLock(t *testing.T) {
 	if err := os.WriteFile(path, []byte("pid="+fmt.Sprint(os.Getpid())+"\nprocess=reused\ncreated_at=2000-01-01T00:00:00Z\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	release, err := AcquireRoot(root)
+	release, err := AcquireRoot(context.Background(), root)
 	if err != nil {
 		t.Fatalf("stale owner metadata blocked a live lock: %v", err)
 	}
@@ -280,7 +301,7 @@ func TestCatalogStaleOwnerAndPIDReuseDoNotBypassFileLock(t *testing.T) {
 	waitForCatalogSignal(t, ready)
 	acquired := make(chan error, 1)
 	go func() {
-		release, err := AcquireRoot(root)
+		release, err := AcquireRoot(context.Background(), root)
 		if err == nil {
 			release()
 		}
@@ -301,7 +322,7 @@ func TestCatalogStaleOwnerAndPIDReuseDoNotBypassFileLock(t *testing.T) {
 }
 
 func helperMetadataUpdate(ctx context.Context, root, groupID string) error {
-	release, err := acquireCatalogMutation(root, groupID)
+	release, err := acquireCatalogMutation(context.Background(), root, groupID)
 	if err != nil {
 		return err
 	}

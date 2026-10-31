@@ -16,6 +16,7 @@ import (
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/catalog"
 	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/inbound"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/serviceapi"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/worker"
@@ -29,6 +30,8 @@ var serviceFindProcess = FindProcess
 type Options struct {
 	CatalogRoot    string
 	ModuleConfig   string
+	SingBoxConfig  string
+	InboundConfig  string
 	StateFile      string
 	ProgressDir    string
 	DelayDir       string
@@ -41,30 +44,35 @@ type Options struct {
 
 // Status 是仪表盘使用的服务状态快照，字段与 netproxyctl schema=1 保持一致。
 type Status struct {
-	State                  string `json:"state"`
-	PID                    *int   `json:"pid"`
-	StartedAt              int64  `json:"started_at"`
-	ReadyAt                int64  `json:"ready_at"`
-	UptimeSeconds          int64  `json:"uptime_seconds"`
-	Error                  string `json:"error"`
-	OutboundMode           string `json:"outbound_mode"`
-	ConfiguredOutboundMode string `json:"configured_outbound_mode"`
-	SelectorMode           string `json:"selector_mode"`
-	ActiveGroupID          string `json:"active_group_id"`
-	ActiveGroupName        string `json:"active_group_name"`
-	ActiveGroupNodeCount   int    `json:"active_group_node_count"`
-	SelectedNodeRef        string `json:"selected_node_ref"`
-	RuntimeSelected        string `json:"runtime_selected"`
-	MemoryBytes            uint64 `json:"memory_bytes"`
-	ProcessCPUTicks        uint64 `json:"process_cpu_ticks"`
-	SystemCPUTicks         uint64 `json:"system_cpu_ticks"`
-	CPUCount               int    `json:"cpu_count"`
-	ConnectionsIn          int32  `json:"connections_in"`
-	ConnectionsOut         int32  `json:"connections_out"`
-	UploadTotal            int64  `json:"upload_total"`
-	DownloadTotal          int64  `json:"download_total"`
-	WorkerState            string `json:"worker_state"`
-	WorkerPID              *int   `json:"worker_pid"`
+	State                  string   `json:"state"`
+	ConfiguredBackend      string   `json:"configured_backend"`
+	ActiveBackend          *string  `json:"active_backend"`
+	PID                    *int     `json:"pid"`
+	StartedAt              int64    `json:"started_at"`
+	CoreStartedAtMillis    int64    `json:"core_started_at_millis"`
+	ReadyAt                int64    `json:"ready_at"`
+	UptimeSeconds          int64    `json:"uptime_seconds"`
+	Error                  string   `json:"error"`
+	OutboundMode           string   `json:"outbound_mode"`
+	ConfiguredOutboundMode string   `json:"configured_outbound_mode"`
+	AvailableOutboundModes []string `json:"available_outbound_modes"`
+	SelectorMode           string   `json:"selector_mode"`
+	ActiveGroupID          string   `json:"active_group_id"`
+	ActiveGroupName        string   `json:"active_group_name"`
+	ActiveGroupRuntimeTag  string   `json:"active_group_runtime_tag"`
+	ActiveGroupNodeCount   int      `json:"active_group_node_count"`
+	SelectedNodeRef        string   `json:"selected_node_ref"`
+	RuntimeSelected        string   `json:"runtime_selected"`
+	MemoryBytes            uint64   `json:"memory_bytes"`
+	ProcessCPUTicks        uint64   `json:"process_cpu_ticks"`
+	SystemCPUTicks         uint64   `json:"system_cpu_ticks"`
+	CPUCount               int      `json:"cpu_count"`
+	ConnectionsIn          int32    `json:"connections_in"`
+	ConnectionsOut         int32    `json:"connections_out"`
+	UploadTotal            int64    `json:"upload_total"`
+	DownloadTotal          int64    `json:"download_total"`
+	WorkerState            string   `json:"worker_state"`
+	WorkerPID              *int     `json:"worker_pid"`
 }
 
 // DelayResult 是一次节点测速请求及其最新分组状态。
@@ -111,35 +119,53 @@ type ModeState struct {
 }
 
 type stateFile struct {
-	State     string `json:"state"`
-	PID       int    `json:"pid"`
-	StartedAt int64  `json:"started_at"`
-	ReadyAt   int64  `json:"ready_at"`
-	Error     string `json:"error"`
+	State               string `json:"state"`
+	PID                 int    `json:"pid"`
+	StartedAt           int64  `json:"started_at"`
+	ReadyAt             int64  `json:"ready_at"`
+	Error               string `json:"error"`
+	ActiveBackend       string `json:"active_backend"`
+	CoreStartedAtMillis int64  `json:"core_started_at_millis"`
 }
 
 // ReadStatus 读取模块状态并在服务就绪时合并 Service API 快照。
 func ReadStatus(ctx context.Context, options Options) (Status, error) {
 	options = normalizeOptions(options)
 	state := readState(options.StateFile)
-	module := readModuleConfig(options.ModuleConfig)
+	module, err := moduleconfig.LoadModule(options.ModuleConfig)
+	if err != nil {
+		return Status{}, err
+	}
+	modes, err := moduleconfig.LoadModes(options.SingBoxConfig)
+	if err != nil {
+		return Status{}, err
+	}
 	status := Status{
 		State:                  state.State,
 		StartedAt:              state.StartedAt,
 		ReadyAt:                state.ReadyAt,
 		Error:                  state.Error,
 		OutboundMode:           unknownOutboundMode,
-		ConfiguredOutboundMode: module.OutboundMode,
-		SelectorMode:           module.SelectorMode,
+		ConfiguredOutboundMode: modes.Mode,
+		AvailableOutboundModes: modes.Available,
+		SelectorMode:           module.Mode(),
 		ActiveGroupID:          module.ActiveGroupID,
-		SelectedNodeRef:        module.SelectedNodeRef,
+		SelectedNodeRef:        module.Ref(),
 		CPUCount:               1,
 		WorkerState:            "stopped",
+	}
+	if options.InboundConfig != "" {
+		config, err := inbound.Load(options.InboundConfig)
+		if err != nil {
+			return Status{}, err
+		}
+		status.ConfiguredBackend = config.Backend
 	}
 
 	active, activeErr := readActiveGroup(ctx, options, module.ActiveGroupID)
 	if active != nil {
 		status.ActiveGroupName = active.Group.Name
+		status.ActiveGroupRuntimeTag = active.Group.RuntimeTag
 		status.ActiveGroupNodeCount = active.Group.NodeCount
 	}
 	if activeErr != nil {
@@ -167,9 +193,8 @@ func ReadStatus(ctx context.Context, options Options) (Status, error) {
 		if status.State == "stopped" || state.PID != pid {
 			status.State = "starting"
 		}
-		status.ProcessCPUTicks = processCPUTicks(pid)
 	}
-	status.SystemCPUTicks, status.CPUCount = systemCPUTicks()
+	status.ProcessCPUTicks, status.SystemCPUTicks, status.CPUCount = CPUUsage(pid)
 
 	if status.State == "ready" && status.ReadyAt > 0 {
 		if elapsed := time.Now().Unix() - status.ReadyAt; elapsed >= 0 {
@@ -177,7 +202,7 @@ func ReadStatus(ctx context.Context, options Options) (Status, error) {
 		}
 	}
 
-	if worker, err := readWorkerStatus(options); err == nil {
+	if worker, err := readWorkerStatus(ctx, options); err == nil {
 		status.WorkerState = worker.State
 		if worker.State == "running" && worker.PID > 0 {
 			pid := worker.PID
@@ -186,12 +211,22 @@ func ReadStatus(ctx context.Context, options Options) (Status, error) {
 	}
 
 	if status.State == "ready" {
-		mergeRuntimeStatus(ctx, options, &status, active)
+		mergeRuntimeStatus(ctx, options, &status, active, state)
 	} else if status.State == "stopped" {
 		// 服务未运行时没有核心实时模式，展示持久化配置作为下一次启动模式。
 		status.OutboundMode = status.ConfiguredOutboundMode
 	}
-	return status, nil
+	return status, ctx.Err()
+}
+
+// CPUUsage 采集进程与系统 CPU 计数，供普通快照和共享事件流使用。
+func CPUUsage(pid int) (uint64, uint64, int) {
+	system, count := systemCPUTicks()
+	var process uint64
+	if pid > 0 {
+		process = processCPUTicks(pid)
+	}
+	return process, system, count
 }
 
 // ReadGroups 读取 Service API 当前的节点组和测速状态。
@@ -217,7 +252,7 @@ func readNodes(ctx context.Context, options Options, module moduleconfig.ModuleC
 		return nil, errors.New("Catalog 根目录不能为空")
 	}
 	if strings.TrimSpace(groupID) != "" {
-		resolved, err := catalog.ResolveGroup(options.CatalogRoot, groupID)
+		resolved, err := catalog.ResolveGroup(ctx, options.CatalogRoot, groupID)
 		if err != nil {
 			return nil, err
 		}
@@ -239,71 +274,42 @@ func ReadSelection(ctx context.Context, options Options) (Selection, error) {
 		return Selection{}, err
 	}
 	runtimeGroups, _ := readRuntimeGroups(ctx, options)
-	return selectionFromRuntimeGroups(module, groups, runtimeGroups), nil
+	return SelectionFromRuntimeGroups(module, groups, runtimeGroups), nil
 }
 
 // ReadSnapshot 读取持久化节点并尽力合并运行时 Service API 状态。
 func ReadSnapshot(ctx context.Context, options Options, groupID string) (Snapshot, error) {
 	options = normalizeOptions(options)
+	groupID = strings.TrimSpace(groupID)
 	module := readModuleConfig(options.ModuleConfig)
-	allGroups, err := readNodes(ctx, options, module, "", true)
+	groups, err := readNodes(ctx, options, module, groupID, true)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	runtimeGroups, _ := readRuntimeGroups(ctx, options)
-	selection := selectionFromRuntimeGroups(module, allGroups, runtimeGroups)
-	groups := allGroups
-	if strings.TrimSpace(groupID) != "" {
-		resolved, resolveErr := resolveSnapshotGroup(allGroups, groupID)
-		if resolveErr != nil {
-			return Snapshot{}, resolveErr
-		}
-		groups = groups[:0]
-		for _, candidate := range allGroups {
-			if candidate.Group.ID == resolved {
-				groups = append(groups, candidate)
-				break
-			}
+	selectionGroups := groups
+	if groupID != "" && (len(groups) != 1 || groups[0].Group.ID != module.ActiveGroupID) {
+		selectionGroups, err = readNodes(ctx, options, module, "", false)
+		if err != nil {
+			return Snapshot{}, err
 		}
 	}
+	runtimeGroups, _ := readRuntimeGroups(ctx, options)
+	selection := SelectionFromRuntimeGroups(module, selectionGroups, runtimeGroups)
 	return Snapshot{Groups: groups, Selection: selection, RuntimeGroups: runtimeGroups}, nil
 }
 
-func resolveSnapshotGroup(groups []catalog.GroupSnapshot, query string) (string, error) {
-	for _, group := range groups {
-		if group.Group.ID == query {
-			return group.Group.ID, nil
-		}
-	}
-	match := ""
-	for _, group := range groups {
-		if group.Group.Name != query {
-			continue
-		}
-		if match != "" {
-			return "", fmt.Errorf("分组名称不唯一: %s", query)
-		}
-		match = group.Group.ID
-	}
-	if match == "" {
-		return "", fmt.Errorf("分组不存在: %s", query)
-	}
-	return match, nil
-}
-
-// ReadMode 读取模块模式，并在核心运行时补充当前 Service API 模式。
+// ReadMode 读取主配置模式，并在核心运行时补充当前 Service API 模式。
 func ReadMode(ctx context.Context, options Options) (ModeState, error) {
 	options = normalizeOptions(options)
-	module := readModuleConfig(options.ModuleConfig)
-	state := ModeState{
-		Mode:      normalizeModuleMode(module.OutboundMode),
-		Available: []string{"rule", "global", "direct", "AllowAds"},
+	modes, err := moduleconfig.LoadModes(options.SingBoxConfig)
+	if err != nil {
+		return ModeState{}, err
 	}
-	runtimeMode, err := readRuntimeMode(ctx, options)
-	if err == nil {
-		state.RuntimeMode = runtimeMode
+	state := ModeState{Mode: modes.Mode, Available: modes.Available}
+	if ProcessRunning(options.SingBoxPath) {
+		state.RuntimeMode, _ = readRuntimeMode(ctx, options)
 	}
-	return state, nil
+	return state, ctx.Err()
 }
 
 // ReadRuntimeMode 读取 Service API 当前出站模式。
@@ -311,19 +317,25 @@ func ReadRuntimeMode(ctx context.Context, options Options) (string, error) {
 	return readRuntimeMode(ctx, normalizeOptions(options))
 }
 
-// SetMode 将模块模式映射为 Service API 模式并提交。
+// SetMode 提交内核原生模式，并确认内核没有静默拒绝该模式。
 func SetMode(ctx context.Context, options Options, mode string) error {
-	runtimeMode, err := moduleModeToServiceMode(mode)
-	if err != nil {
-		return err
-	}
 	client, requestContext, cancel, err := newClient(ctx, options)
 	if err != nil {
 		return err
 	}
 	defer cancel()
 	defer client.Close()
-	return client.SetMode(requestContext, runtimeMode)
+	if err := client.SetMode(requestContext, mode); err != nil {
+		return err
+	}
+	actual, err := client.Mode(requestContext)
+	if err != nil {
+		return err
+	}
+	if actual.Current != mode {
+		return fmt.Errorf("核心模式未生效: 期望 %s，实际 %s", mode, actual.Current)
+	}
+	return nil
 }
 
 // CloseAllConnections 关闭核心当前维护的全部连接。
@@ -484,6 +496,9 @@ func delayResultProgress(target string, outbounds []serviceapi.GroupItem) (expec
 
 func normalizeOptions(options Options) Options {
 	layout := paths.Default()
+	if options.SingBoxConfig == "" {
+		options.SingBoxConfig = paths.SingBoxConfig(layout.SingBoxDir())
+	}
 	if options.ServiceAddress == "" {
 		options.ServiceAddress = "127.0.0.1:9090"
 	}
@@ -589,11 +604,11 @@ func readModuleConfig(path string) moduleconfig.ModuleConfig {
 	return moduleconfig.DefaultModule()
 }
 
-func selectionFromRuntimeGroups(module moduleconfig.ModuleConfig, groups []catalog.GroupSnapshot, runtimeGroups []serviceapi.Group) Selection {
+func SelectionFromRuntimeGroups(module moduleconfig.ModuleConfig, groups []catalog.GroupSnapshot, runtimeGroups []serviceapi.Group) Selection {
 	selection := Selection{
 		ActiveGroupID:   module.ActiveGroupID,
-		SelectorMode:    module.SelectorMode,
-		SelectedNodeRef: module.SelectedNodeRef,
+		SelectorMode:    module.Mode(),
+		SelectedNodeRef: module.Ref(),
 	}
 	for _, group := range groups {
 		if group.Group.ID != module.ActiveGroupID {
@@ -604,7 +619,7 @@ func selectionFromRuntimeGroups(module moduleconfig.ModuleConfig, groups []catal
 		selection.ActiveGroupNodeCount = group.Group.NodeCount
 		if group.Group.NodeCount == 0 {
 			selection.Selected = ""
-		} else if module.SelectorMode == "urltest" {
+		} else if module.SelectedNodeTag == "" {
 			selection.Selected = "Auto/" + group.Group.RuntimeTag
 		} else {
 			selection.Selected = selection.SelectedNodeRef
@@ -615,10 +630,7 @@ func selectionFromRuntimeGroups(module moduleconfig.ModuleConfig, groups []catal
 		selection.ActiveGroupName = module.ActiveGroupID
 	}
 	if selection.ActiveGroupRuntimeTag != "" {
-		runtimeGroup := "Auto/" + selection.ActiveGroupRuntimeTag
-		if module.SelectorMode == "manual" {
-			runtimeGroup = "Select/" + selection.ActiveGroupRuntimeTag
-		}
+		runtimeGroup, _ := module.Selection.RuntimeTargets(selection.ActiveGroupRuntimeTag)
 		for _, group := range runtimeGroups {
 			if group.Tag == runtimeGroup {
 				selection.RuntimeSelected = group.Selected
@@ -652,46 +664,10 @@ func readRuntimeMode(ctx context.Context, options Options) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return serviceModeToModuleMode(mode.Current)
-}
-
-func normalizeModuleMode(value string) string {
-	switch value {
-	case "rule", "global", "direct", "AllowAds":
-		return value
-	default:
-		return "rule"
+	if mode.Current == "" {
+		return "", errors.New("核心未返回当前模式")
 	}
-}
-
-func moduleModeToServiceMode(value string) (string, error) {
-	switch value {
-	case "rule":
-		return "Rule", nil
-	case "global":
-		return "Global", nil
-	case "direct":
-		return "Direct", nil
-	case "AllowAds":
-		return "AllowAds", nil
-	default:
-		return "", fmt.Errorf("未知出站模式: %s", value)
-	}
-}
-
-func serviceModeToModuleMode(value string) (string, error) {
-	switch value {
-	case "Rule":
-		return "rule", nil
-	case "Global":
-		return "global", nil
-	case "Direct":
-		return "direct", nil
-	case "AllowAds":
-		return "AllowAds", nil
-	default:
-		return "", fmt.Errorf("未知 Service API 模式: %s", value)
-	}
+	return mode.Current, nil
 }
 
 func readActiveGroup(ctx context.Context, options Options, activeID string) (*catalog.GroupSnapshot, error) {
@@ -708,7 +684,7 @@ func readActiveGroup(ctx context.Context, options Options, activeID string) (*ca
 	return &catalog.GroupSnapshot{Group: summary}, nil
 }
 
-func mergeRuntimeStatus(ctx context.Context, options Options, status *Status, active *catalog.GroupSnapshot) {
+func mergeRuntimeStatus(ctx context.Context, options Options, status *Status, active *catalog.GroupSnapshot, state stateFile) {
 	status.OutboundMode = unknownOutboundMode
 	client, requestContext, cancel, err := newClient(ctx, options)
 	if err != nil {
@@ -717,14 +693,20 @@ func mergeRuntimeStatus(ctx context.Context, options Options, status *Status, ac
 	defer cancel()
 	defer client.Close()
 	var (
-		mode      serviceapi.Mode
-		modeErr   error
-		apiStatus serviceapi.Status
-		statusErr error
-		groups    []serviceapi.Group
-		groupsErr error
-		waitGroup sync.WaitGroup
+		mode        serviceapi.Mode
+		modeErr     error
+		apiStatus   serviceapi.Status
+		statusErr   error
+		groups      []serviceapi.Group
+		groupsErr   error
+		waitGroup   sync.WaitGroup
+		started     serviceapi.StartedAt
+		identityErr error
 	)
+	confirmedIdentity := status.PID != nil && state.PID == *status.PID && state.CoreStartedAtMillis > 0 && (state.ActiveBackend == "ebpf" || state.ActiveBackend == "tun")
+	if confirmedIdentity {
+		waitGroup.Go(func() { started, identityErr = client.StartedAt(requestContext) })
+	}
 	waitGroup.Go(func() {
 		modeContext, modeCancel := context.WithTimeout(requestContext, 500*time.Millisecond)
 		defer modeCancel()
@@ -739,11 +721,14 @@ func mergeRuntimeStatus(ctx context.Context, options Options, status *Status, ac
 		})
 	}
 	waitGroup.Wait()
+	if confirmedIdentity && identityErr == nil && started.UnixMilli == state.CoreStartedAtMillis {
+		status.CoreStartedAtMillis = started.UnixMilli
+		backend := state.ActiveBackend
+		status.ActiveBackend = &backend
+	}
 
-	if modeErr == nil {
-		if runtimeMode, mapErr := serviceModeToModuleMode(mode.Current); mapErr == nil {
-			status.OutboundMode = runtimeMode
-		}
+	if modeErr == nil && mode.Current != "" {
+		status.OutboundMode = mode.Current
 	}
 	if statusErr != nil {
 		return
@@ -790,8 +775,8 @@ func resolveDelayRequest(ctx context.Context, options Options, target, group str
 	activeID := module.ActiveGroupID
 	if target == "" {
 		group = activeID
-		if module.SelectorMode == "manual" {
-			return runtimeNodeDelayRequest(ctx, options.CatalogRoot, module.SelectedNodeRef)
+		if module.SelectedNodeTag != "" {
+			return runtimeNodeDelayRequest(ctx, options.CatalogRoot, module.Ref())
 		}
 		target = "auto"
 	}
@@ -803,7 +788,7 @@ func resolveDelayRequest(ctx context.Context, options Options, target, group str
 		if err != nil {
 			return delayRequest{}, err
 		}
-		runtimeTag, err := catalog.RuntimeTag(options.CatalogRoot, resolvedGroup)
+		runtimeTag, err := catalog.RuntimeTag(ctx, options.CatalogRoot, resolvedGroup)
 		if err != nil {
 			return delayRequest{}, err
 		}
@@ -817,7 +802,7 @@ func resolveDelayRequest(ctx context.Context, options Options, target, group str
 		if err != nil {
 			return delayRequest{}, err
 		}
-		runtimeTag, err := catalog.RuntimeTag(options.CatalogRoot, resolvedGroup)
+		runtimeTag, err := catalog.RuntimeTag(ctx, options.CatalogRoot, resolvedGroup)
 		if err != nil {
 			return delayRequest{}, err
 		}
@@ -827,7 +812,7 @@ func resolveDelayRequest(ctx context.Context, options Options, target, group str
 }
 
 func resolveDelayGroup(ctx context.Context, options Options, query string) (string, error) {
-	resolved, err := catalog.ResolveGroup(options.CatalogRoot, query)
+	resolved, err := catalog.ResolveGroup(ctx, options.CatalogRoot, query)
 	if err == nil {
 		return resolved, nil
 	}
@@ -850,7 +835,7 @@ func runtimeNodeDelayRequest(ctx context.Context, root, reference string) (delay
 	if !found || groupID == "" || tag == "" {
 		return delayRequest{}, errors.New("节点引用格式应为 <group-id>/<tag>")
 	}
-	runtimeTag, err := catalog.RuntimeTag(root, groupID)
+	runtimeTag, err := catalog.RuntimeTag(ctx, root, groupID)
 	if err != nil {
 		return delayRequest{}, err
 	}
@@ -864,12 +849,12 @@ func runtimeNodeDelayRequest(ctx context.Context, root, reference string) (delay
 	return delayRequest{Target: runtimeTag + "/" + tag, GroupID: groupID, NodeTag: tag}, nil
 }
 
-func readWorkerStatus(options Options) (worker.Status, error) {
+func readWorkerStatus(ctx context.Context, options Options) (worker.Status, error) {
 	workerOptions := worker.NewOptions(options.CatalogRoot)
 	workerOptions.ProgressDir = options.ProgressDir
 	workerOptions.PIDFile = options.WorkerPIDFile
-	workerOptions.ModuleConf = options.ModuleConfig
-	return worker.ReadStatus(workerOptions)
+	workerOptions.ModuleConfig = options.ModuleConfig
+	return worker.ReadStatus(ctx, workerOptions)
 }
 
 // FindProcess 返回与指定可执行文件匹配的进程；statePID 可减少 /proc 扫描。

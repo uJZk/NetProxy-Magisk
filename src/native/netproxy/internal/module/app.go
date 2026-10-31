@@ -3,11 +3,11 @@ package module
 
 import (
 	"context"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -15,13 +15,14 @@ import (
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/catalog"
 	moduleconfig "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/config"
-	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/ebpf"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/inbound"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
-	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/rawconfig"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/service"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/serviceapi"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/subscription"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/telemetry"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/worker"
+	"github.com/sagernet/sing-box/option"
 )
 
 // Options 描述模块目录、运行时目录和平台适配器路径。
@@ -31,7 +32,7 @@ type Options struct {
 	ManagerVersionCode string
 	CatalogRoot        string
 	ModuleConfig       string
-	EBPFConfig         string
+	InboundConfig      string
 	SingBoxPath        string
 	SingBoxDir         string
 	RuntimeDir         string
@@ -43,8 +44,13 @@ type Options struct {
 	WorkerPIDFile      string
 	WorkerLogFile      string
 	WiFiStateFile      string
-	SkipServiceReload  bool
 	RequestTimeout     time.Duration
+	// TransferContext 仅在服务生命周期结束时取消订阅下载，不取消持久事务。
+	TransferContext    context.Context
+	NetworkStateReader worker.NetworkStateReader
+	Telemetry          *telemetry.Reporter
+	configEditors      map[string]*moduleconfig.Editor
+	networkEvaluation  *NetworkEvaluation
 }
 
 // NewOptions 根据模块根目录返回完整的默认路径。
@@ -54,7 +60,7 @@ func NewOptions(moduleDir string) Options {
 		ModuleDir:      layout.Root(),
 		CatalogRoot:    layout.Catalog(),
 		ModuleConfig:   layout.ModuleConfig(),
-		EBPFConfig:     layout.EBPFConfig(),
+		InboundConfig:  layout.InboundConfig(),
 		SingBoxPath:    layout.SingBox(),
 		SingBoxDir:     layout.SingBoxDir(),
 		RuntimeDir:     layout.Runtime(),
@@ -67,30 +73,18 @@ func NewOptions(moduleDir string) Options {
 		WorkerLogFile:  layout.ServiceLog(),
 		WiFiStateFile:  layout.WiFiState(),
 		RequestTimeout: 8 * time.Second,
+		Telemetry:      telemetry.New(layout),
 	}
 }
 
 // PrepareResult 描述一次运行时准备结果。
 type PrepareResult struct {
 	catalog.RuntimeResult
-	Providers string `json:"providers"`
-	Outbounds string `json:"outbounds"`
-	EBPF      string `json:"ebpf"`
-	// Raw 为真时模块运行用户提供的完整配置，上面三个生成文件全部为空。
-	Raw         bool   `json:"raw"`
-	RawConfig   string `json:"raw_config,omitempty"`
-	RawServices string `json:"raw_services,omitempty"`
-}
-
-// ConfigArgs 返回本次启动实际交给 sing-box 的配置参数。
-func (result PrepareResult) ConfigArgs(singBoxDir string) []string {
-	if result.Raw {
-		return []string{"-c", result.RawConfig, "-c", result.RawServices}
-	}
-	return []string{
-		"-C", paths.SingBoxConfDir(singBoxDir),
-		"-c", result.Providers, "-c", result.Outbounds, "-c", result.EBPF,
-	}
+	Providers string             `json:"providers"`
+	Outbounds string             `json:"outbounds"`
+	Inbound   string             `json:"inbound"`
+	Backend   string             `json:"backend"`
+	Network   *NetworkEvaluation `json:"-"`
 }
 
 // AppPolicy 描述分应用代理的持久设置。
@@ -101,7 +95,7 @@ type AppPolicy struct {
 	BypassApps string `json:"bypass_apps"`
 }
 
-// Prepare 生成 Catalog、出站和 eBPF 运行时配置，并同步规范化选择状态。
+// Prepare 生成 Catalog、出站和当前受管入站运行时配置。
 func Prepare(ctx context.Context, options Options, allowEmpty bool) (PrepareResult, error) {
 	if err := options.validate(); err != nil {
 		return PrepareResult{}, err
@@ -111,18 +105,38 @@ func Prepare(ctx context.Context, options Options, allowEmpty bool) (PrepareResu
 			return PrepareResult{}, err
 		}
 	}
-	raw, err := RawConfigEnabled(options)
+	providers := filepath.Join(options.RuntimeDir, "providers.json")
+	outbounds := filepath.Join(options.RuntimeDir, "outbounds.json")
+	inboundPath := filepath.Join(options.RuntimeDir, "inbound.json")
+	config, err := inbound.Load(options.InboundConfig)
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	if raw {
-		// 直通模式不生成任何运行时配置：providers、outbounds 和 eBPF 入站都由
-		// 用户配置自己决定，生成后再交给 sing-box 只会和用户配置重复叠加。
-		return prepareRawConfig(options)
+	if err := validateManagedConfig(options, config); err != nil {
+		return PrepareResult{}, err
 	}
-	providers := filepath.Join(options.RuntimeDir, "providers.json")
-	outbounds := filepath.Join(options.RuntimeDir, "outbounds.json")
-	ebpfPath := filepath.Join(options.RuntimeDir, "ebpf.json")
+	if config.Backend == "tun" {
+		groups, err := catalog.GroupIDs(ctx, options.CatalogRoot, "all")
+		if err != nil {
+			return PrepareResult{}, err
+		}
+		for _, id := range groups {
+			document, err := catalog.GroupProvider(ctx, options.CatalogRoot, id)
+			if err != nil {
+				return PrepareResult{}, err
+			}
+			for _, outbound := range document.Outbounds {
+				if dialer, ok := outbound.Options.(option.DialerOptionsWrapper); ok && dialer.TakeDialerOptions().RoutingMark != 0 {
+					return PrepareResult{}, tunRoutingMarkConflict("catalog.routing_mark")
+				}
+			}
+			for _, endpoint := range document.Endpoints {
+				if dialer, ok := endpoint.Options.(option.DialerOptionsWrapper); ok && dialer.TakeDialerOptions().RoutingMark != 0 {
+					return PrepareResult{}, tunRoutingMarkConflict("catalog.routing_mark")
+				}
+			}
+		}
+	}
 	runtime, err := catalog.BuildRuntime(ctx, catalog.RuntimeOptions{
 		Root: options.CatalogRoot, ModuleConfig: options.ModuleConfig,
 		ProvidersOutput: providers, OutboundsOutput: outbounds,
@@ -131,56 +145,34 @@ func Prepare(ctx context.Context, options Options, allowEmpty bool) (PrepareResu
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	config, err := ebpf.Load(options.EBPFConfig)
+	network, err := configuredNetwork(ctx, options)
 	if err != nil {
 		return PrepareResult{}, err
 	}
-	missingPackages, err := ebpf.WriteAtomic(ebpfPath, config)
+	if network.DesiredMode == "Direct" {
+		if err := validateDirectRouting(options); err != nil {
+			return PrepareResult{}, err
+		}
+	}
+	config, err = config.WithDNSBypass(network.DesiredMode == "Direct")
+	if err != nil {
+		return PrepareResult{}, err
+	}
+	missingPackages, err := inbound.WriteAtomic(ctx, inboundPath, config)
 	if err != nil {
 		return PrepareResult{}, err
 	}
 	for _, ref := range missingPackages {
-		logService(options, "WARN", "ebpf.package", "skipped", "分应用代理跳过未安装应用: %s", ref.String())
+		logService(options, "WARN", "inbound.package", "skipped", "分应用代理跳过未安装应用: %s", ref.String())
 	}
-	return PrepareResult{RuntimeResult: runtime, Providers: providers, Outbounds: outbounds, EBPF: ebpfPath}, nil
+	return PrepareResult{RuntimeResult: runtime, Providers: providers, Outbounds: outbounds, Inbound: inboundPath, Backend: config.Backend, Network: &network}, nil
 }
 
-// prepareRawConfig 校验直通模式所需的文件，并给出实际要加载的配置组合。
-// 模块不再生成 eBPF 入站：抓取入口由用户配置自己声明。生成一份追加上去会和
-// 配置里已有的 ebpf 入站叠加成两个——tag 相同直接校验失败，tag 不同则两段
-// eBPF 程序抢同一批 TC 挂载点。
-func prepareRawConfig(options Options) (PrepareResult, error) {
-	configPath := paths.SingBoxRawConfig(options.SingBoxDir)
-	content, err := os.ReadFile(configPath)
-	if err != nil {
-		return PrepareResult{}, fmt.Errorf("直通配置不可用，请先执行 config raw update: %w", err)
+func (options Options) updateSelection(ctx context.Context, selection moduleconfig.Selection) error {
+	if editor := options.configEditors[filepath.Clean(options.ModuleConfig)]; editor != nil {
+		return editor.UpdateSelection(selection)
 	}
-	if err := rawconfig.CheckDocument(content); err != nil {
-		return PrepareResult{}, err
-	}
-	servicesPath := paths.SingBoxServicesDoc(options.SingBoxDir)
-	if _, err := os.Stat(servicesPath); err != nil {
-		return PrepareResult{}, fmt.Errorf("Service API 文档不可用: %w", err)
-	}
-	return PrepareResult{Raw: true, RawConfig: configPath, RawServices: servicesPath}, nil
-}
-
-func syncRuntimeSelection(path string, runtime catalog.RuntimeResult) error {
-	module, err := moduleconfig.LoadModule(path)
-	if err != nil {
-		return err
-	}
-	updates := map[string]string{}
-	if module.ActiveGroupID != runtime.ActiveGroup {
-		updates["ACTIVE_GROUP_ID"] = moduleconfig.Quote(runtime.ActiveGroup)
-	}
-	if module.SelectorMode != runtime.SelectorMode {
-		updates["SELECTOR_MODE"] = runtime.SelectorMode
-	}
-	if module.SelectedNodeRef != runtime.SelectedNodeRef {
-		updates["SELECTED_NODE_REF"] = moduleconfig.Quote(runtime.SelectedNodeRef)
-	}
-	return moduleconfig.UpdateModule(path, updates)
+	return moduleconfig.UpdateSelection(ctx, options.ModuleConfig, selection)
 }
 
 // Check 生成隔离运行时配置并执行 sing-box check。
@@ -192,16 +184,7 @@ func Check(ctx context.Context, options Options, allowEmpty bool) (PrepareResult
 	if options.SingBoxPath == "" {
 		return prepared, errors.New("sing-box 路径为空")
 	}
-	confDir := paths.SingBoxConfDir(options.SingBoxDir)
-	command := exec.CommandContext(ctx, options.SingBoxPath, "check", "-C", confDir,
-		"-c", prepared.Providers, "-c", prepared.Outbounds, "-c", prepared.EBPF)
-	command.Dir = options.SingBoxDir
-	command.Stdout = os.Stderr
-	command.Stderr = os.Stderr
-	if err := command.Run(); err != nil {
-		return prepared, fmt.Errorf("sing-box 配置检查失败: %w", err)
-	}
-	return prepared, nil
+	return prepared, checkPreparedConfiguration(ctx, options, prepared)
 }
 
 // SelectNode 更新持久选择，并在服务运行时通过 Service API 同步选择器。
@@ -211,309 +194,290 @@ func SelectNode(ctx context.Context, options Options, target, group string) (dat
 	if err := options.validate(); err != nil {
 		return nil, err
 	}
+	lock, err := waitLifecycleLock(ctx, options.StateFile)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.release()
+	if err := recoverConfigApply(ctx, options); err != nil {
+		return nil, err
+	}
+	options, release, err := lockConfigFiles(ctx, options, options.ModuleConfig)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	module, err := moduleconfig.LoadModule(options.ModuleConfig)
 	if err != nil {
 		return nil, err
 	}
+	selection := moduleconfig.Selection{ActiveGroupID: group}
 	if target == "auto" {
 		if strings.TrimSpace(group) == "" {
-			group = module.ActiveGroupID
+			selection.ActiveGroupID = module.ActiveGroupID
 		}
-		group, err = catalog.ResolveGroup(options.CatalogRoot, group)
+	} else {
+		selection.ActiveGroupID, selection.SelectedNodeTag, err = splitReference(target)
 		if err != nil {
 			return nil, err
 		}
-		hasNodes, err := catalog.GroupHasNodes(ctx, options.CatalogRoot, group)
-		if err != nil || !hasNodes {
-			if err != nil {
-				return nil, err
-			}
-			return nil, errors.New("目标分组没有可用节点")
-		}
-		updates := map[string]string{
-			"ACTIVE_GROUP_ID": moduleconfig.Quote(group), "SELECTOR_MODE": "urltest",
-			"SELECTED_NODE_REF": moduleconfig.Quote(""),
-		}
-		if err := moduleconfig.UpdateModule(options.ModuleConfig, updates); err != nil {
-			return nil, err
-		}
-		persisted = true
-		runtimeTag, err := catalog.RuntimeTag(options.CatalogRoot, group)
-		if err != nil {
-			return nil, err
-		}
-		if err := syncRuntimeSelector(ctx, options, "Auto/"+runtimeTag, ""); err != nil {
-			return nil, err
-		}
-		return map[string]string{"group_id": group, "mode": "urltest", "selected": "Auto/" + runtimeTag}, nil
 	}
-	groupID, tag, found := strings.Cut(target, "/")
-	if !found || groupID == "" || tag == "" {
-		return nil, errors.New("节点引用格式应为 <group-id>/<tag>")
-	}
-	groupID, err = catalog.ResolveGroup(options.CatalogRoot, groupID)
+	selection, runtimeTag, err := catalog.ResolveSelection(ctx, options.CatalogRoot, selection)
 	if err != nil {
 		return nil, err
 	}
-	present, err := catalog.GroupContainsTag(ctx, options.CatalogRoot, groupID, tag)
-	if err != nil || !present {
-		if err != nil {
+	if selection != module.Selection {
+		if err := options.updateSelection(ctx, selection); err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("未找到节点: %s/%s", groupID, tag)
-	}
-	runtimeTag, err := catalog.RuntimeTag(options.CatalogRoot, groupID)
-	if err != nil {
-		return nil, err
-	}
-	if err := moduleconfig.UpdateModule(options.ModuleConfig, map[string]string{
-		"ACTIVE_GROUP_ID": moduleconfig.Quote(groupID), "SELECTOR_MODE": "manual",
-		"SELECTED_NODE_REF": moduleconfig.Quote(groupID + "/" + tag),
-	}); err != nil {
-		return nil, err
 	}
 	persisted = true
-	if err := syncRuntimeSelector(ctx, options, "Select/"+runtimeTag, runtimeTag+"/"+tag); err != nil {
-		return nil, err
+	active, inner := selection.RuntimeTargets(runtimeTag)
+	selected := active
+	if inner != "" {
+		selected = inner
 	}
-	return map[string]string{"group_id": groupID, "mode": "manual", "selected": runtimeTag + "/" + tag}, nil
+	data = map[string]string{"group_id": selection.ActiveGroupID, "mode": selection.Mode(), "selected": selected}
+	if service.ProcessRunning(options.SingBoxPath) {
+		if err := syncRuntimeSelector(ctx, options, active, inner); err != nil {
+			return data, &service.Error{Code: "node.runtime_sync_failed", Message: fmt.Sprintf("节点选择已保存，但运行时切换失败: %v", err),
+				Data: map[string]any{"persisted": true, "runtime_synced": false, "group_id": selection.ActiveGroupID, "mode": selection.Mode(), "selected": selected, "cause": err.Error()}}
+		}
+	}
+	return data, nil
 }
 
-// SyncSelection 将 module.conf 中保存的选择同步到运行中的 sing-box。
-func SyncSelection(ctx context.Context, options Options) (map[string]string, error) {
+func syncSelection(ctx context.Context, options Options) error {
 	module, err := moduleconfig.LoadModule(options.ModuleConfig)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if strings.TrimSpace(module.ActiveGroupID) == "" {
-		return map[string]string{"mode": "urltest", "selected": ""}, nil
+		return nil
 	}
-	if module.SelectorMode == "manual" && strings.TrimSpace(module.SelectedNodeRef) != "" {
-		return SelectNode(ctx, options, module.SelectedNodeRef, "")
+	_, runtimeTag, err := catalog.ResolveSelection(ctx, options.CatalogRoot, module.Selection)
+	if err != nil {
+		return err
 	}
-	return SelectNode(ctx, options, "auto", module.ActiveGroupID)
+	active, inner := module.Selection.RuntimeTargets(runtimeTag)
+	return syncRuntimeSelector(ctx, options, active, inner)
 }
 
 func syncRuntimeSelector(ctx context.Context, options Options, active, inner string) error {
-	if !service.ProcessRunning(options.SingBoxPath) {
-		return nil
-	}
 	client, err := serviceapi.New(options.ServiceAddress, options.ServiceSecret)
-	if err == nil {
-		err = retryRuntimeSelection(ctx, client, options, active, inner)
-		client.Close()
-		if err == nil {
-			return nil
-		}
-	}
-	if options.SkipServiceReload {
-		return fmt.Errorf("Service API 切换失败，跳过嵌套服务 reload: %w", err)
-	}
-	_, reloadErr := ManageService(ctx, options, "reload")
-	return reloadErr
-}
-
-// retryRuntimeSelection 等待 reload 后的 selector 完成注册，再同步组内与顶层选择器。
-func retryRuntimeSelection(ctx context.Context, client *serviceapi.Client, options Options, active, inner string) error {
-	const backoff = 300 * time.Millisecond
-	deadline := time.Now().Add(minTimeout(options.RequestTimeout, 6*time.Second))
-	var lastErr error
-	for time.Now().Before(deadline) {
-		requestContext, cancel := context.WithTimeout(ctx, minTimeout(options.RequestTimeout, time.Second))
-		lastErr = nil
-		if inner != "" {
-			lastErr = client.Select(requestContext, active, inner)
-			if lastErr == nil {
-				lastErr = client.Select(requestContext, "Proxy", active)
-			}
-		} else {
-			lastErr = client.Select(requestContext, "Proxy", active)
-		}
-		cancel()
-		if lastErr == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-		}
-	}
-	if lastErr == nil {
-		lastErr = context.DeadlineExceeded
-	}
-	return lastErr
-}
-
-// ApplyMode 持久化出站模式，并优先使用 Service API 同步运行实例。
-func ApplyMode(ctx context.Context, options Options, mode string) (err error) {
-	persisted := false
-	defer func() { logOperation(options, "mode", "mode.apply", "出站模式切换", persisted, err) }()
-	if mode != "rule" && mode != "global" && mode != "direct" && mode != "AllowAds" {
-		return fmt.Errorf("未知出站模式: %s", mode)
-	}
-	if err := moduleconfig.UpdateModule(options.ModuleConfig, map[string]string{"OUTBOUND_MODE": mode}); err != nil {
+	if err != nil {
 		return err
 	}
-	persisted = true
-	if !service.ProcessRunning(options.SingBoxPath) {
-		return nil
-	}
-	mapped := map[string]string{"rule": "Rule", "global": "Global", "direct": "Direct", "AllowAds": "AllowAds"}[mode]
-	client, err := serviceapi.New(options.ServiceAddress, options.ServiceSecret)
-	if err == nil {
-		requestContext, cancel := context.WithTimeout(ctx, minTimeout(options.RequestTimeout, 4*time.Second))
-		err = client.SetMode(requestContext, mapped)
-		cancel()
-		client.Close()
-		if err == nil {
-			return nil
+	defer client.Close()
+	requestContext, cancel := context.WithTimeout(ctx, minTimeout(options.RequestTimeout, 6*time.Second))
+	defer cancel()
+	for {
+		if err := requestContext.Err(); err != nil {
+			return err
+		}
+		attemptContext, cancelAttempt := context.WithTimeout(requestContext, time.Second)
+		err := client.SelectGroup(attemptContext, active, inner)
+		cancelAttempt()
+		if err == nil || !serviceapi.IsRetryable(err) {
+			return err
+		}
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-requestContext.Done():
+			timer.Stop()
+			return errors.Join(err, requestContext.Err())
+		case <-timer.C:
 		}
 	}
-	if options.SkipServiceReload {
-		return fmt.Errorf("Service API 模式切换失败，跳过嵌套服务 reload: %w", err)
-	}
-	_, reloadErr := ManageService(ctx, options, "reload")
-	return reloadErr
 }
 
-// UpdateApp 按类型化 eBPF 配置修改分应用策略。
-func UpdateApp(options Options, action, value string) (data AppPolicy, err error) {
+// UpdateApp 在配置事务锁内修改最新应用策略，并应用到运行实例。
+func UpdateApp(ctx context.Context, options Options, action, value string) (data AppPolicy, err error) {
 	persisted := false
 	defer func() { logOperation(options, "app", "app-policy.update", "分应用策略更新", persisted, err) }()
-	config, err := ebpf.Load(options.EBPFConfig)
+	if err := options.validate(); err != nil {
+		return AppPolicy{}, err
+	}
+	options, release, err := lockConfigApply(ctx, options, options.InboundConfig, false)
 	if err != nil {
 		return AppPolicy{}, err
 	}
-	updates := map[string]string{}
+	defer release()
+	content, err := os.ReadFile(options.InboundConfig)
+	if err != nil {
+		return AppPolicy{}, err
+	}
+	config, err := inbound.Parse(content)
+	if err != nil {
+		return AppPolicy{}, err
+	}
+	policy := config.App
 	switch action {
 	case "mode":
 		if value != "blacklist" && value != "whitelist" {
 			return AppPolicy{}, errors.New("应用模式应为 blacklist 或 whitelist")
 		}
-		updates["APP_PROXY_ENABLE"] = "1"
-		updates["APP_PROXY_MODE"] = moduleconfig.Quote(value)
+		policy.Enabled = true
+		policy.Mode = value
 	case "add":
-		ref, err := ebpf.ParsePackageRef(value)
+		ref, err := inbound.ParsePackageRef(value)
 		if err != nil {
 			return AppPolicy{}, err
 		}
-		if config.AppProxyMode == "whitelist" {
-			updates["PROXY_APPS_LIST"] = moduleconfig.Quote(addPackageRef(config.ProxyPackages, ref))
+		if policy.Mode == "whitelist" {
+			policy.ProxyApps = addPackageRef(policy.ProxyApps, ref.String())
 		} else {
-			updates["BYPASS_APPS_LIST"] = moduleconfig.Quote(addPackageRef(config.BypassPackages, ref))
+			policy.BypassApps = addPackageRef(policy.BypassApps, ref.String())
 		}
-		updates["APP_PROXY_ENABLE"] = "1"
+		policy.Enabled = true
 	case "remove":
-		ref, err := ebpf.ParsePackageRef(value)
+		ref, err := inbound.ParsePackageRef(value)
 		if err != nil {
 			return AppPolicy{}, err
 		}
-		updates["PROXY_APPS_LIST"] = moduleconfig.Quote(removePackageRef(config.ProxyPackages, ref))
-		updates["BYPASS_APPS_LIST"] = moduleconfig.Quote(removePackageRef(config.BypassPackages, ref))
+		policy.ProxyApps = slices.DeleteFunc(policy.ProxyApps, func(item string) bool { return item == ref.String() })
+		policy.BypassApps = slices.DeleteFunc(policy.BypassApps, func(item string) bool { return item == ref.String() })
 	case "enable", "disable":
-		updates["APP_PROXY_ENABLE"] = map[string]string{"enable": "1", "disable": "0"}[action]
+		policy.Enabled = action == "enable"
 	default:
 		return AppPolicy{}, fmt.Errorf("未知应用操作: %s", action)
 	}
-	if err := moduleconfig.UpdateValidated(options.EBPFConfig, updates, func(candidate string) error {
-		_, validateErr := ebpf.Load(candidate)
-		return validateErr
-	}); err != nil {
-		return AppPolicy{}, err
-	}
-	persisted = true
-	config, err = ebpf.Load(options.EBPFConfig)
+	content, err = json.Marshal(map[string]inbound.AppPolicy{"app": policy}, json.Deterministic(true))
 	if err != nil {
 		return AppPolicy{}, err
 	}
+	if _, err := applyConfigLocked(ctx, options, "inbound/app", options.InboundConfig, content, false, ""); err != nil {
+		return AppPolicy{}, err
+	}
+	persisted = true
+	config.App = policy
 	return appPolicy(config), nil
 }
 
-func appPolicy(config ebpf.Config) AppPolicy {
+func appPolicy(config inbound.Config) AppPolicy {
 	return AppPolicy{
-		Enabled:    config.AppProxyEnable,
-		Mode:       config.AppProxyMode,
-		ProxyApps:  joinPackageRefs(config.ProxyPackages),
-		BypassApps: joinPackageRefs(config.BypassPackages),
+		Enabled:    config.App.Enabled,
+		Mode:       config.App.Mode,
+		ProxyApps:  strings.Join(config.App.ProxyApps, ","),
+		BypassApps: strings.Join(config.App.BypassApps, ","),
 	}
 }
 
 // NodeAppend 将节点加入本地分组并处理活动状态与运行时 reload。
 func NodeAppend(ctx context.Context, options Options, groupID, input string, allowInsecure bool) (mutation catalog.MutationResult, err error) {
-	defer func() { logOperation(options, "node", "node.append", "节点添加", mutation.Revision > 0, err) }()
+	return nodeAppend(ctx, options, groupID, "append", allowInsecure, func(mutationOptions catalog.MutationOptions) (catalog.MutationResult, error) {
+		mutationOptions.Input = input
+		return catalog.AppendNode(ctx, mutationOptions)
+	})
+}
+
+// NodeAppendContent 将原始内容加入本地分组，不读取客户端指定的文件路径。
+func NodeAppendContent(ctx context.Context, options Options, groupID string, content []byte, allowInsecure bool) (catalog.MutationResult, error) {
+	return nodeAppend(ctx, options, groupID, "append", allowInsecure, func(mutationOptions catalog.MutationOptions) (catalog.MutationResult, error) {
+		return catalog.AppendNodeContent(ctx, mutationOptions, content)
+	})
+}
+
+// NodeImport 将本地文件中的节点追加到 default 本地配置组。
+func NodeImport(ctx context.Context, options Options, input string, allowInsecure bool) (mutation catalog.MutationResult, err error) {
+	return nodeAppend(ctx, options, "default", "import", allowInsecure, func(mutationOptions catalog.MutationOptions) (catalog.MutationResult, error) {
+		mutationOptions.Input = input
+		return catalog.AppendNode(ctx, mutationOptions)
+	})
+}
+
+// NodeImportContent 将原始节点内容追加到 default 组，不读取客户端指定的文件路径。
+func NodeImportContent(ctx context.Context, options Options, content []byte, allowInsecure bool) (catalog.MutationResult, error) {
+	return nodeAppend(ctx, options, "default", "import", allowInsecure, func(mutationOptions catalog.MutationOptions) (catalog.MutationResult, error) {
+		return catalog.AppendNodeContent(ctx, mutationOptions, content)
+	})
+}
+
+func nodeAppend(ctx context.Context, options Options, groupID, action string, allowInsecure bool, appendNodes func(catalog.MutationOptions) (catalog.MutationResult, error)) (mutation catalog.MutationResult, err error) {
+	message := "节点添加"
+	if action == "import" {
+		message = "节点导入"
+	}
+	defer func() { logOperation(options, "node", "node."+action, message, mutation.Revision > 0, err) }()
+	options, saved, release, err := lockCatalogChange(ctx, options)
+	if err != nil {
+		return catalog.MutationResult{}, err
+	}
+	defer release()
 	if err := ensureDefaultGroup(ctx, options); err != nil {
 		return catalog.MutationResult{}, err
 	}
 	if groupID == "" {
 		groupID = "default"
 	}
-	groupID, err = catalog.ResolveGroup(options.CatalogRoot, groupID)
+	groupID, err = catalog.ResolveGroup(ctx, options.CatalogRoot, groupID)
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
-	result, err := catalog.AppendNode(ctx, catalog.MutationOptions{GroupDir: filepath.Join(options.CatalogRoot, groupID), GroupID: groupID, Type: "local", Input: input, AllowInsecure: allowInsecure})
-	if err != nil {
-		return catalog.MutationResult{}, err
-	}
-	if err := syncCatalogChange(ctx, options, groupID, result.StructureChanged); err != nil {
-		return result, err
-	}
-	return result, nil
-}
-
-// NodeImport 将本地文件中的节点追加到 default 本地配置组。
-func NodeImport(ctx context.Context, options Options, input string, allowInsecure bool) (mutation catalog.MutationResult, err error) {
-	defer func() { logOperation(options, "node", "node.import", "节点导入", mutation.Revision > 0, err) }()
-	if err := ensureDefaultGroup(ctx, options); err != nil {
-		return catalog.MutationResult{}, err
-	}
-	const groupID = "default"
-	result, err := catalog.AppendNode(ctx, catalog.MutationOptions{
+	result, err := appendNodes(catalog.MutationOptions{
 		GroupDir:      filepath.Join(options.CatalogRoot, groupID),
 		GroupID:       groupID,
 		Type:          "local",
-		Input:         input,
 		AllowInsecure: allowInsecure,
 	})
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
-	if err := syncCatalogChange(ctx, options, groupID, result.StructureChanged); err != nil {
-		return result, err
-	}
-	return result, nil
+	_, attempted, err := syncCatalogChange(ctx, options, saved, groupID, result.StructureChanged, service.ProcessRunning(options.SingBoxPath))
+	return result, catalogChangeError("node", attempted, err)
 }
 
 // NodeEdit 原子替换指定分组的节点。
 func NodeEdit(ctx context.Context, options Options, reference, input string, allowInsecure bool) (mutation catalog.MutationResult, err error) {
+	return nodeEdit(ctx, options, reference, allowInsecure, func(mutationOptions catalog.MutationOptions) (catalog.MutationResult, error) {
+		mutationOptions.Input = input
+		return catalog.EditNode(ctx, mutationOptions)
+	})
+}
+
+// NodeEditContent 使用原始内容替换指定节点，不解释设备文件路径。
+func NodeEditContent(ctx context.Context, options Options, reference string, content []byte, allowInsecure bool) (catalog.MutationResult, error) {
+	return nodeEdit(ctx, options, reference, allowInsecure, func(mutationOptions catalog.MutationOptions) (catalog.MutationResult, error) {
+		return catalog.EditNodeContent(ctx, mutationOptions, content)
+	})
+}
+
+func nodeEdit(ctx context.Context, options Options, reference string, allowInsecure bool, editNode func(catalog.MutationOptions) (catalog.MutationResult, error)) (mutation catalog.MutationResult, err error) {
 	defer func() { logOperation(options, "node", "node.edit", "节点编辑", mutation.Revision > 0, err) }()
+	options, saved, release, err := lockCatalogChange(ctx, options)
+	if err != nil {
+		return catalog.MutationResult{}, err
+	}
+	defer release()
 	groupID, tag, err := splitReference(reference)
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
-	groupID, err = catalog.ResolveGroup(options.CatalogRoot, groupID)
+	groupID, err = catalog.ResolveGroup(ctx, options.CatalogRoot, groupID)
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
-	result, err := catalog.EditNode(ctx, catalog.MutationOptions{GroupDir: filepath.Join(options.CatalogRoot, groupID), GroupID: groupID, Tag: tag, Input: input, AllowInsecure: allowInsecure})
+	result, err := editNode(catalog.MutationOptions{GroupDir: filepath.Join(options.CatalogRoot, groupID), GroupID: groupID, Tag: tag, AllowInsecure: allowInsecure})
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
-	if err := syncCatalogChange(ctx, options, groupID, result.StructureChanged); err != nil {
-		return result, err
-	}
-	return result, nil
+	_, attempted, err := syncCatalogChange(ctx, options, saved, groupID, result.StructureChanged, service.ProcessRunning(options.SingBoxPath))
+	return result, catalogChangeError("node", attempted, err)
 }
 
 // NodeRemove 删除指定节点，并在手动节点消失时回退 Auto。
 func NodeRemove(ctx context.Context, options Options, reference string) (mutation catalog.MutationResult, err error) {
 	defer func() { logOperation(options, "node", "node.remove", "节点删除", mutation.Revision > 0, err) }()
+	options, saved, release, err := lockCatalogChange(ctx, options)
+	if err != nil {
+		return catalog.MutationResult{}, err
+	}
+	defer release()
 	groupID, tag, err := splitReference(reference)
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
-	groupID, err = catalog.ResolveGroup(options.CatalogRoot, groupID)
+	groupID, err = catalog.ResolveGroup(ctx, options.CatalogRoot, groupID)
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
@@ -521,118 +485,126 @@ func NodeRemove(ctx context.Context, options Options, reference string) (mutatio
 	if err != nil {
 		return catalog.MutationResult{}, err
 	}
-	if err := fallbackMissingNode(ctx, options, groupID); err != nil {
-		return result, err
-	}
-	if err := syncCatalogChange(ctx, options, groupID, result.StructureChanged); err != nil {
-		return result, err
-	}
-	return result, nil
+	_, attempted, err := syncCatalogChange(ctx, options, saved, groupID, result.StructureChanged, service.ProcessRunning(options.SingBoxPath))
+	return result, catalogChangeError("node", attempted, err)
 }
 
 // RemoveSubscription 删除订阅并处理活动分组替代。
 func RemoveSubscription(ctx context.Context, options Options, query, replacement string) (err error) {
 	deleted := false
 	defer func() { logOperation(options, "subscription", "subscription.remove", "订阅删除", deleted, err) }()
-	groupID, err := catalog.ResolveGroup(options.CatalogRoot, query)
+	options, saved, release, err := lockCatalogChange(ctx, options)
 	if err != nil {
 		return err
 	}
-	typ, err := catalog.GroupType(options.CatalogRoot, groupID)
+	defer release()
+	groupID, err := catalog.ResolveGroup(ctx, options.CatalogRoot, query)
+	if err != nil {
+		return err
+	}
+	typ, err := catalog.GroupType(ctx, options.CatalogRoot, groupID)
 	if err != nil || typ != "subscription" {
 		return errors.New("目标不是 URL 订阅")
 	}
-	module, err := moduleconfig.LoadModule(options.ModuleConfig)
-	if err != nil {
-		return err
-	}
-	if module.ActiveGroupID == groupID {
-		if replacement != "" {
-			replacement, err = catalog.ResolveGroup(options.CatalogRoot, replacement)
-			if err != nil {
-				return err
-			}
-		} else {
-			replacement, err = catalog.FirstNonEmptyGroup(ctx, options.CatalogRoot, groupID)
-			if err != nil {
-				return err
-			}
+	if replacement != "" {
+		replacement, err = catalog.ResolveGroup(ctx, options.CatalogRoot, replacement)
+		if err != nil {
+			return err
 		}
-		if replacement != "" {
-			if _, err := SelectNode(ctx, options, "auto", replacement); err != nil {
-				return err
-			}
-		} else {
-			if err := moduleconfig.UpdateModule(options.ModuleConfig, map[string]string{"ACTIVE_GROUP_ID": moduleconfig.Quote(""), "SELECTOR_MODE": "urltest", "SELECTED_NODE_REF": moduleconfig.Quote("")}); err != nil {
-				return err
-			}
-			if service.ProcessRunning(options.SingBoxPath) {
-				if _, err := ManageService(ctx, options, "stop"); err != nil {
-					return err
-				}
-			}
+		if replacement == groupID {
+			return errors.New("替代分组不能是待删除订阅")
+		}
+		if _, _, err := catalog.ResolveSelection(ctx, options.CatalogRoot, moduleconfig.Selection{ActiveGroupID: replacement}); err != nil {
+			return err
 		}
 	}
-	if err := catalog.DeleteGroup(options.CatalogRoot, groupID); err != nil {
+	if err := catalog.DeleteGroup(ctx, options.CatalogRoot, groupID); err != nil {
 		return err
 	}
 	deleted = true
-	if service.ProcessRunning(options.SingBoxPath) {
-		_, reloadErr := ManageService(ctx, options, "reload")
-		return reloadErr
-	}
-	return nil
+	_, attempted, err := syncCatalogChange(ctx, options, saved, replacement, true, service.ProcessRunning(options.SingBoxPath))
+	return catalogChangeError("subscription", attempted, err)
 }
 
-func syncCatalogChange(ctx context.Context, options Options, groupID string, structureChanged bool) error {
+func lockCatalogChange(ctx context.Context, options Options) (Options, moduleconfig.Selection, func(), error) {
+	if err := options.validate(); err != nil {
+		return options, moduleconfig.Selection{}, nil, err
+	}
+	lock, err := waitLifecycleLock(ctx, options.StateFile)
+	if err != nil {
+		return options, moduleconfig.Selection{}, nil, err
+	}
+	if err := recoverConfigApply(ctx, options); err != nil {
+		lock.release()
+		return options, moduleconfig.Selection{}, nil, err
+	}
+	options, release, err := lockConfigFiles(ctx, options, options.ModuleConfig, options.InboundConfig, paths.SingBoxConfig(options.SingBoxDir))
+	if err != nil {
+		lock.release()
+		return options, moduleconfig.Selection{}, nil, err
+	}
 	module, err := moduleconfig.LoadModule(options.ModuleConfig)
 	if err != nil {
-		return err
+		release()
+		lock.release()
+		return options, moduleconfig.Selection{}, nil, err
 	}
-	hasActive, err := catalog.GroupHasNodes(ctx, options.CatalogRoot, module.ActiveGroupID)
-	if err != nil {
-		return err
-	}
-	if !hasActive {
-		if hasNodes, _ := catalog.GroupHasNodes(ctx, options.CatalogRoot, groupID); hasNodes {
-			_, err := SelectNode(ctx, options, "auto", groupID)
-			return err
-		}
-		replacement, _ := catalog.FirstNonEmptyGroup(ctx, options.CatalogRoot, module.ActiveGroupID)
-		if replacement != "" {
-			_, err := SelectNode(ctx, options, "auto", replacement)
-			return err
-		}
-		if _, statErr := os.Stat(filepath.Join(options.CatalogRoot, "default", "meta.json")); statErr == nil {
-			if err := moduleconfig.UpdateModule(options.ModuleConfig, map[string]string{"ACTIVE_GROUP_ID": moduleconfig.Quote("default"), "SELECTOR_MODE": "urltest", "SELECTED_NODE_REF": moduleconfig.Quote("")}); err != nil {
-				return err
-			}
-		} else if err := moduleconfig.UpdateModule(options.ModuleConfig, map[string]string{"ACTIVE_GROUP_ID": moduleconfig.Quote(""), "SELECTOR_MODE": "urltest", "SELECTED_NODE_REF": moduleconfig.Quote("")}); err != nil {
-			return err
-		}
-	}
-	if structureChanged && service.ProcessRunning(options.SingBoxPath) {
-		_, reloadErr := ManageService(ctx, options, "reload")
-		return reloadErr
-	}
-	return nil
+	return options, module.Selection, func() { release(); lock.release() }, nil
 }
 
-func fallbackMissingNode(ctx context.Context, options Options, groupID string) error {
-	module, err := moduleconfig.LoadModule(options.ModuleConfig)
-	if err != nil || module.SelectorMode != "manual" {
-		return err
+// SyncCatalog 将 Worker 的持久化副作用串行化到服务生命周期，不在下载阶段持锁。
+func SyncCatalog(ctx context.Context, options Options, groupID string, structureChanged bool) (string, bool, error) {
+	localContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	options, saved, release, err := lockCatalogChange(localContext, options)
+	if err != nil {
+		return "", false, err
 	}
-	selectedGroup, tag, found := strings.Cut(module.SelectedNodeRef, "/")
-	if !found || selectedGroup != groupID || tag == "" {
+	defer release()
+	return applyCatalogChange(ctx, localContext, options, saved, groupID, structureChanged, service.ProcessRunning(options.SingBoxPath))
+}
+
+func syncCatalogChange(ctx context.Context, options Options, saved moduleconfig.Selection, preferredGroup string, structureChanged, running bool) (string, bool, error) {
+	// Catalog 已提交，取消只能停止运行时请求，不能留下指向已删除节点的持久选择。
+	localContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return applyCatalogChange(ctx, localContext, options, saved, preferredGroup, structureChanged, running)
+}
+
+func applyCatalogChange(ctx, localContext context.Context, options Options, saved moduleconfig.Selection, preferredGroup string, structureChanged, running bool) (string, bool, error) {
+	selection, runtimeTag, err := catalog.NormalizeSelection(localContext, options.CatalogRoot, saved, preferredGroup)
+	if err != nil {
+		return "", false, err
+	}
+	if selection != saved {
+		if err := options.updateSelection(localContext, selection); err != nil {
+			return "", false, err
+		}
+	}
+	if !running {
+		return subscription.RuntimeSyncNotRunning, false, nil
+	}
+	if runtimeTag == "" {
+		return subscription.RuntimeSyncNotRunning, true, StopService(ctx, options)
+	}
+	if structureChanged || selection.ActiveGroupID != saved.ActiveGroupID {
+		err = ReloadService(ctx, options)
+	} else {
+		active, inner := selection.RuntimeTargets(runtimeTag)
+		err = syncRuntimeSelector(ctx, options, active, inner)
+	}
+	return subscription.RuntimeSyncApplied, true, err
+}
+
+func catalogChangeError(component string, attempted bool, err error) error {
+	if err == nil {
 		return nil
 	}
-	present, err := catalog.GroupContainsTag(ctx, options.CatalogRoot, groupID, tag)
-	if err != nil || present {
-		return err
+	code, message := "persisted_effect_failed", "数据已保存，但本地选择整理失败"
+	if attempted {
+		code, message = "runtime_sync_failed", "数据已保存，但运行时同步失败"
 	}
-	_, err = SelectNode(ctx, options, "auto", groupID)
-	return err
+	return &service.Error{Code: component + "." + code, Message: message, Data: map[string]any{"persisted": true, "runtime_synced": false, "cause": err.Error()}}
 }
 
 func ensureDefaultGroup(ctx context.Context, options Options) error {
@@ -651,7 +623,7 @@ func splitReference(reference string) (string, string, error) {
 }
 
 func (options Options) validate() error {
-	for name, value := range map[string]string{"模块配置": options.ModuleConfig, "Catalog": options.CatalogRoot, "eBPF 配置": options.EBPFConfig} {
+	for name, value := range map[string]string{"模块配置": options.ModuleConfig, "Catalog": options.CatalogRoot, "入站配置": options.InboundConfig} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s路径不能为空", name)
 		}
@@ -666,29 +638,11 @@ func minTimeout(value, fallback time.Duration) time.Duration {
 	return value
 }
 
-func addPackageRef(current []ebpf.PackageRef, value ebpf.PackageRef) string {
+func addPackageRef(current []string, value string) []string {
 	if slices.Contains(current, value) {
-		return joinPackageRefs(current)
+		return current
 	}
-	return joinPackageRefs(append(append([]ebpf.PackageRef{}, current...), value))
-}
-
-func removePackageRef(current []ebpf.PackageRef, value ebpf.PackageRef) string {
-	items := make([]ebpf.PackageRef, 0, len(current))
-	for _, ref := range current {
-		if ref != value {
-			items = append(items, ref)
-		}
-	}
-	return joinPackageRefs(items)
-}
-
-func joinPackageRefs(values []ebpf.PackageRef) string {
-	items := make([]string, 0, len(values))
-	for _, value := range values {
-		items = append(items, value.String())
-	}
-	return strings.Join(items, ",")
+	return append(current, value)
 }
 
 // SubscriptionOptions 描述订阅业务的公共路径和 Service 适配器。
@@ -717,10 +671,13 @@ func AddSubscription(ctx context.Context, options SubscriptionOptions) (result s
 	if options.URL == "" {
 		return subscription.Result{}, errors.New("订阅 URL 不能为空")
 	}
+	if err := subscription.ValidateSettings(options.UpdateInterval, options.UpdateViaProxy, options.Timeout); err != nil {
+		return subscription.Result{}, err
+	}
 	if err := ensureDefaultGroup(ctx, options.Options); err != nil {
 		return subscription.Result{}, err
 	}
-	groupID, err := catalog.NewSubscriptionGroupID(options.CatalogRoot)
+	groupID, err := catalog.NewSubscriptionGroupID(ctx, options.CatalogRoot)
 	if err != nil {
 		return subscription.Result{}, err
 	}
@@ -747,7 +704,7 @@ func UpdateSubscription(ctx context.Context, options Options, query string) (res
 	defer func() {
 		logOperation(options, "subscription", "subscription.update", "订阅更新", result.Persisted, err)
 	}()
-	groupID, err := catalog.ResolveGroup(options.CatalogRoot, query)
+	groupID, err := catalog.ResolveGroup(ctx, options.CatalogRoot, query)
 	if err != nil {
 		return subscription.Result{}, err
 	}
@@ -759,7 +716,7 @@ func EditSubscription(ctx context.Context, options Options, query string, edit s
 	defer func() {
 		logOperation(options, "subscription", "subscription.edit", "订阅编辑", result.Persisted, err)
 	}()
-	groupID, err := catalog.ResolveGroup(options.CatalogRoot, query)
+	groupID, err := catalog.ResolveGroup(ctx, options.CatalogRoot, query)
 	if err != nil {
 		return subscription.EditResult{}, err
 	}
@@ -829,7 +786,7 @@ func UpdateAllSubscriptions(ctx context.Context, options Options) (result worker
 	defer func() {
 		logOperation(options, "subscription", "subscription.update-all", "全部订阅更新", false, err)
 	}()
-	ids, err := catalog.GroupIDs(options.CatalogRoot, "subscription")
+	ids, err := catalog.GroupIDs(ctx, options.CatalogRoot, "subscription")
 	if err != nil {
 		return worker.Summary{}, err
 	}
@@ -852,15 +809,17 @@ func workerOptions(options Options) worker.Options {
 	workerOptions := worker.Options{
 		Root:                options.CatalogRoot,
 		ProgressDir:         options.ProgressDir,
+		TransferContext:     options.TransferContext,
 		PIDFile:             options.WorkerPIDFile,
 		LogFile:             options.WorkerLogFile,
-		ModuleConf:          options.ModuleConfig,
+		ModuleConfig:        options.ModuleConfig,
+		APIConfig:           paths.New(options.ModuleDir).APIConfig(),
 		SingBoxPath:         options.SingBoxPath,
 		ServiceAddress:      options.ServiceAddress,
 		ServiceSecret:       options.ServiceSecret,
 		NetworkWatchEnabled: true,
-		ReloadService: func(ctx context.Context) error {
-			return ReloadService(ctx, options)
+		SyncCatalog: func(ctx context.Context, groupID string, structureChanged bool) (string, bool, error) {
+			return SyncCatalog(ctx, options, groupID, structureChanged)
 		},
 		Now: time.Now,
 		NetworkEvaluate: func(ctx context.Context, networkType, ssid string) error {
@@ -868,7 +827,27 @@ func workerOptions(options Options) worker.Options {
 			return err
 		},
 	}
+	if options.Telemetry != nil {
+		workerOptions.Telemetry = options.Telemetry
+		workerOptions.CoreRunning = func() bool {
+			state, err := ReadServiceState(options.StateFile)
+			return err == nil && state.State == "ready" && state.PID > 0 && service.FindProcess(options.SingBoxPath, int(state.PID)) == int(state.PID)
+		}
+	}
 	return workerOptions
+}
+
+// RecordActivity 仅记录公共客户端的活跃；停服入口不能为统计重新启动 Worker。
+func RecordActivity(ctx context.Context, options Options, startWorker bool) {
+	if options.Telemetry == nil || ctx.Err() != nil {
+		return
+	}
+	if added, err := options.Telemetry.RecordActive(time.Now()); added && err == nil {
+		options.Telemetry.Notify()
+		if startWorker {
+			_ = EnsureWorker(ctx, options)
+		}
+	}
 }
 
 func hostName(rawURL string) string {
@@ -881,7 +860,7 @@ func hostName(rawURL string) string {
 
 // LoadAppPolicy 读取分应用代理设置。
 func LoadAppPolicy(configPath string) (AppPolicy, error) {
-	config, err := ebpf.Load(configPath)
+	config, err := inbound.Load(configPath)
 	if err != nil {
 		return AppPolicy{}, err
 	}

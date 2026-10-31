@@ -1,35 +1,39 @@
 package main
 
-func (c *cli) ebpf(args []string) int {
+import (
+	"context"
+	"os"
+
+	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
+)
+
+func (c *cli) ebpf(ctx context.Context, args []string) error {
 	action := "status"
 	if len(args) > 0 {
 		action = args[0]
+		args = args[1:]
 	}
 	switch action {
 	case "status":
 		mode := "configured"
 		raw := false
-		for _, argument := range args[1:] {
+		for _, argument := range args {
 			switch argument {
 			case "configured", "all", "local", "shared":
 				mode = argument
 			case "--raw":
 				raw = true
 			default:
-				return c.fail("usage.invalid", "用法: netproxyctl ebpf status [configured|all|local|shared] [--raw]", 2)
+				return usageError("用法: netproxyctl ebpf status [configured|all|local|shared] [--raw]")
 			}
 		}
-		handlerArgs := []string{
-			"status",
-			"--module-dir", c.moduleDir,
-			"--mode", mode,
-			"--format", "json",
+		data, err := moduleapp.ProbeEBPF(ctx, c.options, mode, raw)
+		if err != nil {
+			return err
 		}
-		if raw {
-			handlerArgs = append(handlerArgs, "--raw")
-		}
-		return c.runCommand(c.context(), runEBPF, handlerArgs...)
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "ebpf.status", Message: "eBPF 能力检查完成", Data: data})
+		return nil
 	default:
-		return c.fail("usage.invalid", "用法: netproxyctl ebpf status [configured|all|local|shared] [--raw]", 2)
+		return usageError("用法: netproxyctl ebpf status [configured|all|local|shared] [--raw]")
 	}
 }

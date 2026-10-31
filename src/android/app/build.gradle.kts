@@ -19,18 +19,33 @@ fun gitCommitCount(): Int {
     }.getOrDefault(1)
 }
 
+val ciManagerBuild = providers.gradleProperty("netproxyManagerCi").orNull == "true"
+val managerVersion = providers.gradleProperty("netproxyManagerVersion").orNull
+    ?: rootProject.file("../module/module.prop").takeIf { it.isFile }?.useLines { lines ->
+        lines.firstOrNull { it.startsWith("version=") }
+            ?.substringAfter('=')
+            ?.removePrefix("v")
+    }
+    ?: "8.2.0"
+val managerBuildId = providers.gradleProperty("netproxyManagerBuildId").orNull ?: "local"
+
 android {
     namespace = "com.fanjv.netproxy"
     compileSdk {
         version = release(37)
     }
 
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_25
+        targetCompatibility = JavaVersion.VERSION_25
+    }
+
     defaultConfig {
         applicationId = "com.fanjv.netproxy"
-        minSdk = 31
+        minSdk = 26
         targetSdk = 37
         versionCode = gitCommitCount()
-        versionName = "8.1.0"
+        versionName = if (ciManagerBuild) "$managerVersion-ci.$managerBuildId" else managerVersion
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -51,6 +66,11 @@ android {
     dependenciesInfo {
         includeInApk = false
         includeInBundle = false
+    }
+
+    androidResources {
+        generateLocaleConfig = true
+        localeFilters += listOf("en", "zh", "ru")
     }
 
     lint {
@@ -75,6 +95,25 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25)
+    }
+}
+
+tasks.withType<Test>().configureEach {
+    // Schema 测试直接读取磁盘文件，它们不在 JVM 测试类路径中，必须显式参与缓存键。
+    inputs.file(layout.projectDirectory.file("src/main/assets/sing-box.schema.json"))
+        .withPropertyName("singBoxSchema")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file(rootProject.layout.projectDirectory.file("../module/config/singbox/config.json"))
+        .withPropertyName("moduleStaticConfigs")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.files(fileTree("src/main/res") { include("values*/strings.xml", "resources.properties") })
+        .withPropertyName("localizedStrings")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -86,21 +125,19 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.material.icons.extended)
 
-    // libsu
-    implementation(libs.libsu.core)
-
     // Miuix
     implementation(libs.miuix.ui)
     implementation(libs.miuix.icons)
-    implementation(libs.miuix.navigation3.ui)
+    implementation(libs.miuix.nav)
     implementation(libs.miuix.preference)
     implementation(libs.miuix.blur)
     implementation(libs.miuix.squircle)
     implementation(libs.scripta.editor)
-    implementation(libs.androidx.navigation3.runtime)
     implementation(libs.androidx.navigationevent.compose)
-    implementation(libs.androidx.lifecycle.viewmodel.navigation3)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.okhttp)
     implementation(libs.hiddenapibypass)
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.okhttp.mockwebserver)
 }

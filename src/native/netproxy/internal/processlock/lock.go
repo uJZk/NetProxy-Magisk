@@ -1,10 +1,12 @@
 package processlock
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // ErrBusy 表示目标文件已被其他进程持有。
@@ -19,6 +21,18 @@ type Lock struct {
 
 // TryAcquire 尝试获取文件锁；进程退出时操作系统会自动释放锁。
 func TryAcquire(path string) (*Lock, error) {
+	return acquire(context.Background(), path, false)
+}
+
+// Acquire 等待文件锁，等待期间遵循调用方的取消和截止时间。
+func Acquire(ctx context.Context, path string) (*Lock, error) {
+	return acquire(ctx, path, true)
+}
+
+func acquire(ctx context.Context, path string, wait bool) (*Lock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -26,14 +40,28 @@ func TryAcquire(path string) (*Lock, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := tryLockFile(file); err != nil {
-		_ = file.Close()
-		if lockFileBusy(err) {
-			return nil, ErrBusy
+	for {
+		err := tryLockFile(file)
+		if err == nil {
+			if err := ctx.Err(); err != nil {
+				return nil, errors.Join(err, unlockFile(file), file.Close())
+			}
+			return &Lock{file: file}, nil
 		}
-		return nil, err
+		if !lockFileBusy(err) {
+			return nil, errors.Join(err, file.Close())
+		}
+		if !wait {
+			return nil, errors.Join(ErrBusy, file.Close())
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, errors.Join(ctx.Err(), file.Close())
+		case <-timer.C:
+		}
 	}
-	return &Lock{file: file}, nil
 }
 
 // Release 释放文件锁；重复调用不会重复解锁或关闭文件。

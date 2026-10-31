@@ -10,20 +10,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/contract"
+	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 )
 
-type result struct {
-	Schema  int    `json:"schema"`
-	OK      bool   `json:"ok"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
-	Data    any    `json:"data,omitzero"`
-}
+type result = contract.Result
 
 type cli struct {
-	moduleDir  string
-	commandCtx context.Context
+	options moduleapp.Options
 }
 
 const (
@@ -38,7 +33,9 @@ func main() {
 
 func newCLI() *cli {
 	layout := paths.Default()
-	return &cli{moduleDir: layout.Root()}
+	options := moduleapp.NewOptions(layout.Root())
+	options.ProgressDir = defaultProgressDir()
+	return &cli{options: options}
 }
 
 func (c *cli) run(ctx context.Context, args []string) int {
@@ -63,32 +60,53 @@ func (c *cli) run(ctx context.Context, args []string) int {
 		commandCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	c.commandCtx = commandCtx
+	var handler commandHandler
 
 	switch args[0] {
 	case "service":
-		return c.service(commandCtx, args[1:])
+		handler = c.service
 	case "catalog":
-		return c.catalog(args[1:])
+		handler = c.catalog
 	case "node":
-		return c.node(args[1:])
+		handler = c.node
 	case "sub":
-		return c.subscription(args[1:])
+		handler = c.subscription
 	case "mode":
-		return c.mode(args[1:])
+		handler = c.mode
 	case "network":
-		return c.network(args[1:])
+		handler = c.network
 	case "app":
-		return c.app(args[1:])
+		handler = c.app
 	case "ebpf":
-		return c.ebpf(args[1:])
+		handler = c.ebpf
 	case "config":
-		return c.config(args[1:])
+		handler = c.config
 	case "logs":
-		return c.logs(args[1:])
+		handler = c.logs
+	case "api":
+		handler = c.api
 	default:
 		return c.fail("usage.invalid", "未知命令组，使用 netproxyctl help 查看帮助", 2)
 	}
+	status := c.runCommand(commandCtx, handler, args[1:]...)
+	if status != 2 && !skipActivity(args) {
+		stop := len(args) > 1 && args[0] == "service" && (args[1] == "stop" || args[1] == "toggle")
+		moduleapp.RecordActivity(commandCtx, c.options, !stop)
+	}
+	return status
+}
+
+func skipActivity(args []string) bool {
+	if len(args) > 1 && args[0] == "api" && args[1] != "start" {
+		return true
+	}
+	for _, arg := range args {
+		if arg == "help" || arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return len(args) > 1 && ((args[0] == "service" && args[1] == "check") ||
+		(args[0] == "config" && (args[1] == "check" || args[1] == "validate")))
 }
 
 func (c *cli) runInternal(ctx context.Context, args []string) int {
@@ -118,48 +136,20 @@ func (c *cli) runInternal(ctx context.Context, args []string) int {
 }
 
 func defaultTimeoutFor(args []string) time.Duration {
+	if len(args) > 2 && args[0] == "config" && args[1] == "raw" && (args[2] == "update" || args[2] == "enable" || args[2] == "disable" || args[2] == "clear") {
+		return serviceStartTimeout
+	}
 	if isSubscriptionMutation(args) {
 		// 每个订阅已经有自己的下载超时；外层默认时限会提前取消事务，丢失已持久化状态。
 		return 0
 	}
-	// restart/reload/toggle 内部同样要停核心、生成配置、跑 sing-box check
-	// 并等待控制接口就绪，光等待就有 30 秒预算；沿用默认时限会在核心还在启动时
-	// 就报命令超时，让人误以为启动失败。
-	if len(args) > 1 && args[0] == "service" && isLongRunningServiceAction(args[1]) {
+	if len(args) > 1 && args[0] == "service" && args[1] == "start" {
 		return serviceStartTimeout
 	}
-	if len(args) > 1 && args[0] == "config" && isLongRunningConfigAction(args[1:]) {
+	if len(args) > 1 && (args[0] == "config" && args[1] == "apply" || args[0] == "service" && (args[1] == "restart" || args[1] == "reload")) {
 		return serviceStartTimeout
 	}
 	return defaultCommandTimeout
-}
-
-func isLongRunningServiceAction(action string) bool {
-	switch action {
-	case "start", "restart", "reload", "toggle":
-		return true
-	default:
-		return false
-	}
-}
-
-// isLongRunningConfigAction 标出会跑 sing-box check 或触发核心 reload 的配置操作。
-// config apply 在核心运行时会完整重载一次（生成配置 -> check -> 重启 -> 等待就绪），
-// 用户配置里的远程 rule-set 还要重新下载，轻易超过默认时限；超时会让调用方
-// （包括 Android 管理器的设置开关）把一次仍在进行的操作误报为失败。
-func isLongRunningConfigAction(args []string) bool {
-	if len(args) == 0 {
-		return false
-	}
-	switch args[0] {
-	case "apply", "validate", "check":
-		return true
-	case "raw":
-		// raw update 要先下载再交给 sing-box 校验。
-		return len(args) > 1 && args[1] == "update"
-	default:
-		return false
-	}
 }
 
 func isSubscriptionMutation(args []string) bool {
@@ -221,11 +211,4 @@ func parseCommandTimeout(value string) (time.Duration, error) {
 		return 0, fmt.Errorf("--timeout 无效: %s", value)
 	}
 	return duration, nil
-}
-
-func (c *cli) context() context.Context {
-	if c.commandCtx != nil {
-		return c.commandCtx
-	}
-	return context.Background()
 }

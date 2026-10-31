@@ -43,3 +43,36 @@ test('只有人工升级时不会伪报自动更新', () => {
   assert.match(report.body, /无自动更新，1 项待人工/)
   assert.match(report.body, /#### Android 依赖/)
 })
+
+test('Web 面板更新只渲染 sing-box Dashboard', () => {
+  const report = buildReport({
+    dashboard: {
+      name: 'sing-box Dashboard',
+      currentCommit: '1234567890abcdef',
+      latestCommit: 'abcdef1234567890',
+      path: 'src/module/webroot/sing-box-dashboard',
+    },
+  })
+
+  assert.match(report.title, /sing-box Dashboard/)
+  assert.match(report.body, /1 个面板/)
+  assert.match(report.body, /src\/module\/webroot\/sing-box-dashboard/)
+})
+
+test('GitHub Actions 更新只作为人工处理候选项', () => {
+  const report = buildReport({
+    actions: [{
+      name: 'actions/checkout',
+      current: 'v6',
+      latestMajor: 'v7',
+      latestRelease: 'v7.1.0',
+      repositoryUrl: 'https://github.com/actions/checkout',
+      releaseUrl: 'https://github.com/actions/checkout/releases/tag/v7.1.0',
+    }],
+  })
+
+  assert.equal(report.title, 'chore(维护): 更新资源、内核与依赖')
+  assert.match(report.body, /1 项待人工升级/)
+  assert.match(report.body, /GitHub Actions（待人工升级）/)
+  assert.match(report.body, /仅生成报告，不自动升级 GitHub Actions/)
+})

@@ -2,6 +2,8 @@ package provider_test
 
 import (
 	"context"
+	"encoding/json/jsontext"
+	json "encoding/json/v2"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -181,5 +183,19 @@ func TestRemoveLastNodeWritesEmptyProvider(t *testing.T) {
 	}
 	if len(loaded.Outbounds)+len(loaded.Endpoints) != 0 {
 		t.Fatalf("expected empty provider: %#v", loaded)
+	}
+}
+
+func TestEmptyProviderWritesOutboundArray(t *testing.T) {
+	content, err := provider.MarshalAllowEmpty(t.Context(), provider.Document{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]jsontext.Value
+	if err := json.Unmarshal(content, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if string(fields["outbounds"]) != "[]" {
+		t.Fatalf("空 Provider 必须输出数组而不是 null: %s", content)
 	}
 }

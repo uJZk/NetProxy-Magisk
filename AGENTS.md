@@ -11,36 +11,47 @@
 - `src/module/`：Magisk、KernelSU 与 APatch 模块，包含生命周期脚本、`netproxyctl`、sing-box 配置、资源和打包内容。
 - `src/native/netproxy/`：模块专用 Go 组件，负责节点转换、Provider、订阅、配置、eBPF 运行时、Service API 与唯一允许的后台 Worker。
 - `src/webui/`：原生 TypeScript 终端式 WebUI，构建产物写入 `src/module/webroot/netproxy/`。
-- `src/android/`：Android 管理器，使用 Compose、miuix、Navigation3 和内置 Scripta 源码快照。
+- `src/android/`：Android 管理器，使用 Compose、miuix-nav 和内置 Scripta 源码快照。
 - `docs/`：VitePress 用户文档；`tests/`：Shell 契约与运行时回归测试。
 
 `src/module/` 与设备上的 `/data/adb/modules/netproxy/` 1:1 对应，改脚本即改部署布局。
 
-8.0 起透明代理入站使用 eBPF，Catalog 是节点与订阅的持久事实源。
+透明代理入站可选择 eBPF 或 Root TUN + auto_redirect，每次只运行一个受管入站；Catalog 是节点与订阅的持久事实源。
 
 ## 核心契约
 
-- `netproxyctl` 是仓库唯一 Go 可执行文件，也是终端、Android 和 WebUI 的唯一模块管理入口；模块生命周期使用同一二进制的隐藏 `__internal` 入口。
+- `netproxyctl` 是仓库唯一 Go 可执行文件；CLI 与模块 HTTP API 直接复用同一领域函数，Android 仅通过模块 HTTPS API 调用业务，当前终端 WebUI 仍调用 CLI。模块生命周期使用同一二进制的隐藏 `__internal` 入口。
 - `__internal` 只允许 `boot` 与 `worker start|stop|run` 这类进程生命周期入口。Catalog、节点、订阅、配置、eBPF、Service API 和服务操作必须由公共命令直接调用 Go 领域处理器，不得重新建立内部命令转发层。
 - 机器接口固定使用 `schema=1` JSON。stdout 只能包含结果 JSON，日志与诊断写 stderr；字段、错误码或状态语义变化必须同步检查 Shell、Go、Android、WebUI 和测试。
 - Native 运行日志固定为 `[timestamp] [LEVEL] [component] [event] [result] [error_code] message`，成功或无错误码时写 `-`；消息必须在落盘前统一脱敏和限长。`logs show service` 的 `entries` 是 Android 展示事实源，不得回退到旧文本猜测。`logs show core` 保持 sing-box 文本，由客户端使用独立解析逻辑。
+- 核心日志使用原生 `log.output=stderr`（省略时同样使用内核默认 stderr），Go 将 stdout/stderr 绑定同一个 `0600` 追加文件句柄并禁用颜色；不得让内核另开日志文件或使用随 CLI 退出的管道采集。核心退出后才允许在下次启动前轮转，清空必须截断当前 inode 并删除备份，不能重命名运行中的日志，否则继承句柄会继续写入不可见文件。
 - Catalog 是持久节点事实源：每组使用 `data/catalog/<group-id>/meta.json` 与 `provider.json`。`staging/` 只存事务临时文件，不得作为持久状态读取。
-- `ACTIVE_GROUP_ID` 保存分组 ID；`SELECTOR_MODE` 只允许 `urltest` 或 `manual`；`SELECTED_NODE_REF` 只在手动模式保存 `<group-id>/<tag>`。
+- 模块设置唯一事实源是 `config/module.json`，顶层固定为 `auto_start/selection/wifi`，开关使用 JSON boolean，名单使用字符串数组；不读取、迁移或兼容旧格式，缺失或损坏不得回退默认配置。
+- 节点选择只持久化 `selection.group_id` 与 `selection.node_tag`：空 tag 使用同组 Auto，非空 tag 手动选择。模式、节点引用和运行时标签由这两项派生，不读取旧选择字段或增加迁移逻辑。
+- 用户选节点按生命周期锁、配置文件锁串行保存和应用；启动与重载只同步已保存选择，不再次调用用户保存入口。选择器 API 仅对临时通信或服务错误在总时限内重试，遵循请求取消；最终失败返回 `node.runtime_sync_failed` 并保留已保存选择，不重载兜底；Catalog 结构变化显式重载。
+- 本地节点变更与删除订阅先等待生命周期锁、恢复未完成配置事务，再提交 Catalog；提交后即使取消也要有界完成本地选择整理，Worker 同步必须在取锁前建立独立收尾上下文，并在锁内读取最新选择。订阅同步状态落盘同样有界且不受请求取消影响，运行时操作仍使用原请求上下文。提交后的本地或运行时失败分别返回 `node.persisted_effect_failed` / `node.runtime_sync_failed` 或对应的 `subscription.*`，并携带 `persisted=true`。Worker 通过 `SyncCatalog` 回调复用同一流程；pending 重试必须重新应用已保存选择，不能只验证 Provider 后清除 pending。
 - Provider 的运行时显示标签来自分组名称；名称冲突时才附加分组 ID。用户界面不得直接显示 UUID 代替可读名称。
 - 自动选择必须落到 `Auto/<group>`，Provider/selector 的默认值绝不能静默回退到 `direct`。
-- eBPF 是 sing-box 的入站实现，不是独立代理核心。服务、模式和节点切换文案继续使用“服务”或“sing-box”，不要泛化为“eBPF 服务”。
+- eBPF 与 TUN 都是 sing-box 的入站实现，不是独立代理核心。服务、模式和节点切换文案继续使用“服务”或“sing-box”，不要泛化为“eBPF 服务”或“TUN 服务”。
+- `config/inbound/inbound.json` 是 backend、独立 Root 策略、共用 app 策略与两套原生入站参数的唯一事实源，不在 module.json 或客户端偏好中双写。外层固定为 `backend/root_policy/app/ebpf/tun`，两个原生对象的 type 匹配分区、tag 均固定为 `netproxy-in`；主配置不得重复定义受管 eBPF/TUN 或占用该标签。
+- `root_policy=default/include/exclude` 独立于 app 开关与名单模式，只投影本机 UID 0，不改原生模板；default 不干预，include 覆盖 UID 0 的原生 UID 排除，exclude 排除 UID 0。空 include 原生表示不限 UID，不得为接管 Root 将其收窄为只含 0；空应用白名单仍可仅接管 Root。原生 include_android_user 通过内核生成排除范围，不能当成 UID include；接管 Root 时该用户范围必须包含用户 0，否则报冲突，不扩大用户范围。仅 eBPF shared 时不应用 Root 策略，也不因该字段变化重载。管理器通用选择即时保存，先提交已确认原生草稿；完整 JSON 编辑入口位于右上角菜单，不在应用列表伪造 Root 条目。
+- 透明代理运行时只有 `runtime/inbound.json`，包含当前选择的一个入站；providers/outbounds 仍独立生成。切换不转换或清空另一套参数，失败不自动改用另一后端。
 - 分应用策略持久化严格的 `<user-id>:<package>` 引用，Android 每个用户独立展示；Go 通过 Android package service 查询 UID，运行时生成 `include_uid` / `exclude_uid`。
-- `EBPF_MODE` 只允许 `local`、`shared` 或 `hybrid`；local/shared 专属字段只能在对应数据路径启用时输出。
-- Service API 与 Clash API 的固定监听和密钥位于 `02_experimental.json`、`08_services.json`。不要重新引入运行时随机 bootstrap，现有 WebUI 依赖固定入口。
-- 服务状态只允许 `stopped/preparing/starting/ready/stopping/failed`。`ready_at` 只能在 sing-box API 与 eBPF 入站均就绪后写入。
-- `service status` 的 `outbound_mode` 表示核心当前实际生效模式；用户在 `module.conf` 中保存的基础模式由 `configured_outbound_mode` 表示。Wi-Fi 自动切换不得覆盖基础模式。
+- eBPF 数据路径由 `ebpf.local.enabled` 与 `ebpf.shared.enabled` 独立启用，选择 eBPF 时至少开启一条；本机 `data_plane` 只允许 `socket_assign/cgroup`，共享网络只允许 `socket_assign/packet_rewrite`。模块两路径缺省均显式投影为 `socket_assign`，不依赖核心的不同默认值；`cgroup` 和 `packet_rewrite` 为手动兼容选择，不接受旧 `tc` 别名或静默回退。禁用路径可保存全部偏好，但运行时只输出 `enabled: false`；`shared.default_interface` 默认关闭，仅按用户配置允许同一上游接口接管。
+- 受管 TUN 固定 `auto_route=true` 与 `auto_redirect=true`，地址必须有效；不额外固定 MTU、stack、strict_route、marks 或 NFQUEUE 默认值。端口 bypass 使用主配置 route 的原生 pre-match 规则，不伪装成 TUN 字段或自动注入第四个 runtime。
+- Service API 与 Clash API 的固定监听和密钥位于 `config/singbox/config.json` 的 `services` 与 `experimental.clash_api`。不要重新引入运行时随机 bootstrap，现有 WebUI 依赖固定入口。
+- 服务状态允许 `stopped/preparing/starting/ready/stopping/failed`，完整配置直通模式另用 `running` 表示进程存活，不声称入站就绪。`ready_at` 只能在 sing-box API 与所选入站均就绪后写入。
+- `service status` 的 `configured_backend` 是入站持久选择字符串；`active_backend` 仅在 ready、实际 PID 与启动记录匹配、API 毫秒级启动身份一致时非空，否则必须为 null。不从当前模板猜测旧核心后端，也不增加后端 PID/锁/状态文件。
+- 出站模式的唯一持久事实源是主配置 `experimental.clash_api.default_mode`；可选列表复用内核 `clashmode.CalculateModeList` 并包含默认模式，使用原生名称，不保留模块字段或固定四模式映射。`service status.outbound_mode` 表示实际模式，`configured_outbound_mode` 表示默认模式，`available_outbound_modes` 表示配置中的模式列表。停止时显示默认模式；运行中 API 不可用时显示 `unknown`。Wi-Fi 策略只修改运行时，不覆盖默认模式。
+- 模式保存与网络策略应用按生命周期锁、配置文件锁顺序串行执行；仅有效入站 DNS 参数变化才原位重载，参数不变时通过 API 切换并回读确认。API 失败不得重载兜底，已保存默认模式保留并返回 `mode.runtime_sync_failed`。Direct 必须先于 DNS 劫持路由；运行时将启用的 eBPF 路径 DNS 设为 off、TUN 设为 disabled，不改保存的偏好。启动/重载冻结同一策略生成入站并校准缓存模式，避免启动后再次重载；已开始的重载有界收尾，不被新网络事件取消。
+- Wi-Fi 策略在 `module.json` 的 `wifi` 对象中分别保存 `enabled` 开关与 `mode=blacklist/whitelist` 模式、独立字符串数组 `blacklist/whitelist` 和 `proxy_on_non_wifi` 开关；界面三态由开关与模式派生，关闭不得清空名单或改写模式。SSID 精确保留空格、大小写和逗号，不读取旧名单字段或将 mode=off 转换为开关。只在策略开启时监听 route/link/address 和 nl80211 事件，按实际出口 station 读取 SSID，不回退到 cmd/dumpsys 文本猜测或定时轮询。未知网络不能当作非 Wi-Fi；开机未知时校准默认模式。只读 `network wifi-list` 经 Go 有界查询已保存名称，不返回密码，不进入遥测，名单落日志与诊断前必须脱敏。
 
 ## 命令入口与脚本布局
 
 - `src/module/netproxyctl` 只负责定位 `bin/netproxyctl`；公共实现位于 `src/native/netproxy/cmd/netproxyctl`。Shell 不再保留公共命令 dispatcher。
-- 命令组权威清单：`service catalog node sub mode network app ebpf config logs`。新增命令组必须同时更新 Go CLI、Android `NetProxyCtlClient`、WebUI `src/exec.ts` 和契约测试。
+- 命令组权威清单：`service catalog node sub mode network app ebpf config logs api`。新增命令组必须同时更新 Go CLI、Android `ModuleApiClient`、WebUI 命令表与传输判断和契约测试。
 - `scripts/` 不承载运行时业务；配置、Catalog、状态和 Service API 业务统一由 Go 实现。
-- 根目录 `service.sh` 只保留 Magisk/KernelSU/APatch 开机桥接；运行时配置、服务生命周期、节点切换、订阅事务和调度由 `netproxyctl __internal` 负责。
+- 根目录 `service.sh` 负责模块开机桥接；运行时配置、节点切换、订阅事务和调度由 Go 负责。
 - Go Worker 负责 Android 网络变化采集、Wi-Fi 状态读取和策略评估。
 - `customize.sh` 在已开机安装时不得提前覆盖 live 模块目录；必须等待管理器写入 `update` 标记后再由脱离安装器 cgroup 的 Shell 完成目录切换。任何校验或切换失败都保留 `modules_update`，交回管理器下次开机处理。
 - 设备上的调用形式是 `su -c /data/adb/modules/netproxy/netproxyctl [--json] <命令组> <命令>`；文档和排查步骤按此形式给出，不要写成裸 `netproxyctl`，它不在 PATH 里。
@@ -57,7 +68,7 @@ src/module/service.sh
 
 - 运行时脚本面向 Android `/system/bin/sh`，只写 POSIX/mksh 可执行语法，不使用 Bash 数组、`[[ ]]`、进程替换或 Bash 专属选项。
 - 参数和路径始终双引号包裹；跨进程传递复杂数据时使用文件或 JSON，不使用 `eval` 拼装命令。
-- 公共业务能力统一放在 Go；Shell 只保留根目录 `service.sh` 的 Magisk 开机桥接，不要在 `netproxyctl`、service 和 worker 中复制配置、Catalog、API 或进程管理逻辑。
+- 公共业务能力统一放在 Go；运行时 Shell 只保留 `service.sh` 开机桥接，不要在 Shell 中复制配置、Catalog、API 或进程管理逻辑。
 - 配置写入使用候选文件、校验和原子替换。订阅更新失败必须保留上一版有效 Provider。
 - 新增可执行文件时同步检查 `customize.sh` 权限列表和模块打包结果。
 
@@ -65,24 +76,56 @@ src/module/service.sh
 
 - `src/native/netproxy` 是 Catalog、Provider、订阅事务、配置、eBPF 运行时、Service API 与 sing-box 生命周期的业务事实源；Shell 只负责模块 service 阶段进入 Go 的平台桥接。
 - 模块、配置、Catalog、运行时、日志、二进制与 `/dev/netproxy` 状态路径统一由 `internal/paths.Layout` 推导。生产代码不得自行拼接这些布局；测试和用户指定的导入、导出、临时路径仍可显式注入。
-- 允许且仅允许一个 Go Worker。它承载订阅调度和可选的 Android 网络监听，不能演变为通用控制守护进程、REST 服务或第二个代理核心。
+- 允许且仅允许一个长期 Go 后台宿主，复用 Worker 进程身份。HTTP 管理服务、订阅调度、Android 网络监听和设备统计并列运行；调度配置错误不得关闭管理接口。PID 所有权覆盖 HTTP 事务收尾，不能在调度退出时提前释放。HTTP 不执行 CLI 或 Shell，不新增第二个守护进程或代理核心。
+- Android Worker 进入长期运行前必须切换到稳定的 `/` 工作目录并清除继承的 `TMPDIR`，使用 Android 原生临时目录；安装器临时目录删除后会使 ART 初始化 `user.dir` 原生崩溃，或使配置校验报 `stat /dev/tmp`。不能仅修复单个 Java 调用或配置保存入口。
+- 模块 HTTP API 的唯一监听与凭据事实源为 `config/api.json`，仅允许 loopback IP 和专用随机 256 bit secret；安装通过 `api init` 显式初始化，已有或损坏文件不得覆盖。API 使用每安装独立的 TLS 证书与私钥，凭据通过 Root 的 `api access` 或固定签名验证后的私有 Provider 交付，不进入日志、诊断、遥测或 URL。客户端校验证书 SHA-256，不允许明文、系统代理、重定向或 Root 回退。HTTP 同时检查 Host、Origin 与 Bearer header，不能用 loopback 代替鉴权或允许通配 CORS。
+- HTTP 复用 `schema=1`、原错误码、revision 和持久化副作用语义。客户端断线不取消已接受写入；服务关闭停止准入，并等待有界事务收尾。上传与下载仅使用服务端私有临时文件或内容接口，不接受设备路径。SSE 只在有订阅者时共享核心流，先发完整快照；旧核心启动身份的帧必须丢弃，慢客户端不得无限缓存。
+- HTTP 的 `HEAD` 不进入领域函数或 SSE。节点添加、编辑与导入直接传内容，共用 CLI 的领域事务，不落临时输入文件。SSE 文件事件按相关主题合并刷新，溢出必须重新校准快照；监听失效必须断开，不能保持连接却静默漏报。
+- HTTP 请求体统一上限 4 MiB，超限返回 `api.body_too_large` 与 413；API 监听失败或意外退出按 1–30 秒退避恢复，不需要重启核心。
+- 事件流的服务状态缓存每次发送仍核对当前文件身份与修改时间，不能只信内存 epoch；核心流按启动身份隔离。groups 更新在固定 250ms 窗口合并，实际模式消费原生 SubscribeClashMode，不能从节点分组猜测或遗漏模式变化。
+- Worker 关停只取消 HTTP 订阅的网络下载阶段；下载完成后的持久事务继续按原有有界上下文收尾，不能以缩短关停时间为由中断提交。Android Worker 默认使用 64 MiB 的 Go 软内存目标，显式 GOMEMLIMIT 优先；目标不包含文件映射或 Java 子进程，不在请求后强制 GC。
+- API 启动不主动交付凭据或拉起管理器；首次连接、凭据失效与显式重连由客户端请求固定签名私有交付。成功交付后冷却 30 秒，失败有界退避，拒绝请求不延长窗口。凭据缓存只在这些边界重读，Provider 原子写入必须立即更新同进程缓存；旧请求的 401 不得清除其他请求已经取得的新凭据。主动重连不预先清空可用资料或修改回连地址，须等待新的 Provider 交付；失败不能覆盖并发新交付，不得重发已接受的写入。
+- 安装 TLS 证书是本机精确钉扎的身份：Go 探测与 Android 校验证书身份和主机名，不依赖证书日期或设备时钟；不得移除钉扎或以接受任意证书替代。订阅创建、编辑和下载前共用领域设置校验，非法代理模式不得落盘后静默按直连执行，HTTP 不重复实现周期和代理模式规则。
+- 请求正文读取期限由 HTTP Server 管理，不在 handler 中为无正文 GET 设置连接读期限，否则长查询与 SSE 会在 15 秒被标准库取消；SSE 保留心跳、逐帧写入期限与真实断连错误。
+- 设备统计只从 Go 公共命令与真实核心启动采集 `module_active`、`service_start_result`，不增加 Android/WebUI SDK。Worker 以 Root 查询用户 0 的 `ANDROID_ID`，用固定 NetProxy 命名空间的 SHA-256 派生设备身份，每个 Worker 成功读取后只缓存在内存；读取失败不得回退随机身份。CLI 不查询设备标识，`config/telemetry/state.json` 只保存每日去重和有界队列，不进入编辑器、日志或诊断包；原始标识不得落盘或上传，Token 只由构建注入。损坏状态不得静默覆盖，系统查询和网络请求不得持有状态锁，上传不得阻塞业务命令。停服入口不得为统计重新启动 Worker，以免停服操作产生后台启动副作用。
 - 使用 reF1nd sing-box 的类型定义解析、生成和校验 Provider，不通过字符串替换拼接协议配置。
 - reF1nd 依赖版本必须与打包的 sing-box 内核兼容；升级时同时验证转换 fixtures、Provider 和 Service API。
 - Native JSON 编解码统一使用 Go 标准库 `encoding/json/v2` 与 `encoding/json/jsontext`，依赖严格字段匹配、重复键拒绝和 UTF-8 校验；持久文件与 `schema=1` 输出必须显式传入 `json.Deterministic(true)`，不要回退到 v1 或设置 `GOEXPERIMENT=nojsonv2`。
 - `cmd/netproxyctl/default.pgo` 只使用真实 Android 上的只读工作负载生成；正式构建保持 `-pgo=auto`，更新 profile 前必须确认不含订阅、节点或设备数据，并对比非 PGO 产物。
 - Provider 修改必须保持完整校验、稳定 tag、`0600` 权限和原子替换。错误必须返回结构化 diagnostics，不允许空输出加成功退出码。
+- Catalog 与配置回滚使用同目录临时文件替换目标，全部恢复成功并记录恢复完成后才删除备份；恢复失败不得清理 journal，否则再次中断可能丢失已恢复的数据。
+- Catalog 事务完成后的清理是可重试收尾，不改变已提交或已恢复的结果；必须先删除全部备份再删除完成标记。仍有备份但 journal 缺失时不得猜测事务结果或丢弃备份。
+- 配置应用按「生命周期锁 → 固定顺序的配置文件锁」执行。内部选择同步显式复用已持有的配置写入器，不能重复获取文件锁；所有配置写入共享同一路径锁，分应用增删必须在锁内读取最新名单。
+- Catalog 等待锁使用调用方 context，分组锁先于根锁。锁文件不保存业务或 owner 状态，互斥由操作系统文件锁保证。
+- sing-box 静态事实源只有 `config/singbox/config.json`。分区编辑由 Go 在配置事务锁内替换指定顶层字段，保留其他字段和数组顺序；客户端使用读取时的 `revision`，同分区冲突返回 `config.conflict`。不能在 Android 中把整份旧快照合并写回。
+- 模块复用 `config read/apply/validate` 的 `module` 完整 JSON 与 `module/wifi`、`module/auto_start` 分区；分区保留对应顶层键，必需且不支持 `{}` 删除，各自 revision 只跟踪所属分区。配置应用复用现有事务，全部模块写入共用 `module.json.lock`，仅在锁内合并最新文件；内部节点选择写入保留未修改分区的原始字段，不能因补齐默认值使 Wi-Fi 草稿 revision 失效。网络匹配与开机自启不得用整份旧快照写回，没有 `module/selection` 公共目标。
+- 入站复用 `config read/apply/validate` 的 `inbound`、`inbound/backend`、`inbound/root_policy`、`inbound/app`、`inbound/ebpf`、`inbound/tun` 目标，不增加公共 inbound 命令组或旧 config ebpf 别名。入站分区必需，不能用 `{}` 删除；全部目标与 app 增删共用配置事务和 `inbound.json.lock`，仅在锁内合并最新文件。
+- `auto_start` 只影响下次开机，单独修改不得重载运行实例。分应用有效策略变化通过配置事务自动 reload，停止时只保存；管理器分应用、入站原生参数与网络匹配只在离页或进入后台合并提交，不使用闲置计时器或待保存提示。普通返回立即导航，提交时先登记目标与本次草稿快照，再由应用级短生命周期任务完成，不随页面销毁取消；重新读取只等待同配置文件的在途写入，不扫描整个作用域。写入阶段不得读取配置，写后确认须在解除该等待后执行；已确认的后端切换与重启同样完成收尾，未确认切换不得在离页后自动执行。保存失败须在页面退出后仍通知用户，页面存续时保留草稿；冲突只能显式放弃草稿后重新加载，恢复前台不得刷新覆盖草稿或借用新 revision 重试。开机自启、后端切换、节点与模式选择仍立即执行；切换后端、重启或进入入站子页前先提交已确认参数。搜索勾选只更新统一名单，不切换加载分支或重新计算搜索结果；默认与搜索列表共用选中优先和反序的显示排序，搜索重排不跟随已选条目滚动。Auto 节点选择只发布完整确认快照，不用缺少实际节点的占位状态覆盖已有显示。
+- `ebpf status` 是保存的 eBPF 模板所选能力的预检，TUN 模式也可执行，不代表当前挂载状态。普通 `data.content` 始终是可读诊断，原始 JSON 仅在显式 `--raw` 时作为正文返回；预检通过不能表述为实际接管成功。
+- 启动只校验当前原生分区；保存分区校验该分区，完整保存校验两套格式，整份 JSON 损坏必须失败。未选分区变化不 reload，停止时保存不启动核心或 Worker。切换后端先停旧实例再启动新实例；强杀或清理未确认时中止并保留 journal，必须设备重启后再恢复，不增加兜底清理。
 - 新增协议或修复解析缺陷时补充不含真实凭据的 fixture/golden 测试。
 
 ## Android 管理器
 
-- 数据流保持 `Compose -> ViewModel -> Repository -> NetProxyCtlClient -> netproxyctl`。页面不直接读取 `/data/adb`、Catalog 文件、PID 或 Shell 文本推断业务状态。
+- 数据流保持 `Compose -> ViewModel -> Repository -> ModuleApiClient -> 模块 HTTPS API`。管理器不申请 Root，不执行 CLI，不直接读取 `/data/adb`、Catalog 文件或 PID。应用标签、图标与多用户由 Go 按需运行模块内 Java DEX 查询系统框架。
+- 普通 HTTP 读取、下载与图标查询随客户端取消；已接受写入有界收尾，不盲目重发。共享 SSE 在前台会话内只增加主题，最后消费者退出后保留 2 秒切页宽限，真正停止后清空会话；断线明确报错，重连重新等待完整快照，不使用轮询回退。首次自动连接只触发固定官方用户 0 的私有 Provider 交付，不通过 HTTP 返回秘密；Provider 校验 Binder UID 0，辅助程序校验当前 APK 签名、UID 与非导出 Provider，不接受请求指定目标。
+- 订阅页列表与 SSE 的 `subscriptions` 快照包含本地和 URL 订阅分组，普通详情同样可读本地分组；URL 私有设置与订阅修改仍限制为 URL 订阅。框架 DEX 绘制应用原生图标直接读取 Android 资源；`loadIcon()` 的厂商主题扩展会在独立 `app_process` 读取系统 Provider 时被拒绝，造成整批图标消失。未声明图标时返回空 `icon_key`，由管理器显示占位图；不得调用 `getDefaultActivityIcon()`，其厂商扩展同样可能使辅助进程原生崩溃。
+- 应用清单通过一次 DEX 查询全部用户并准备固定 128px 的版本化 PNG，图标以 `icon_key` 经鉴权 HTTPS 单独读取；滚动与显示密度变化不得重新启动 DEX 或传输 Base64。独立 `app_process` 的 `systemMain` 不执行应用绑定阶段的字体初始化，必须在创建绘图线程池前加载缺失的系统字体映射，并将其中的 `sans-serif` 交给框架 `setDefault` 解析和注册。延迟字体的 `native_instance` 可合法为 0，不得读取该字段判断初始化成功，也不能只依赖公开 `Typeface.DEFAULT`；否则可能误判加载失败或使符号图标触发原生断言并终止整份查询。凭据交付不加载字体。缓存位于 `data/cache/android-icons` 的平目录，不进入诊断包；Worker 应用清单查询串行，全部用户成功完成后再统一清理，不能按一个用户的名单删除其他用户的图标。凭据交付使用自身互斥与冷却，不等待应用清单槽位。刷新清单不得清空正在显示的图标，仅在新资源就绪后替换。
+- 管理器网络取消只取消本次 OkHttp Call，响应关闭后不得操作其他请求借用的池连接；普通连接池空闲期限短于服务端，只有普通 GET 的响应前通信故障可恢复一次，且共享原调用总时限，正文、超时、取消及 TLS 身份、握手或协议失败不重试，写操作不自动重发。仅证书或对端身份验证异常及其包装清除对应凭据，普通 SSL 读写故障不得误判身份失败。SSE 使用独立调度器、独立 Call 与有界事件缓冲，不占普通请求配额。类型化响应直接解码 Envelope，事件帧只缓存自身的解码结果；筛选事件按帧引用去重，不能为每个 traffic 帧重解完整 groups 或深比较 JSON 树。
 - ViewModel 按功能域持有不可变 `StateFlow`；Repository 负责命令组合和响应映射。不要重新堆回全能 Repository、全能 ViewModel 或静态 Service Locator。
 - 构造依赖由 `AppContainer` 和 `NetProxyViewModelFactory` 提供，不引入 Hilt/Koin，除非先完成明确的全项目架构决策。
 - 遵循现有 miuix 视觉和交互：二级页使用 `AdaptiveTopAppBar`，分组标题使用 miuix `SmallTitle`，列表保持 Lazy item 粒度，卡片优先复用 `groupedCardItems`。有 miuix 对应组件时不另造 Material 风格替代品。
-- Navigation3 是导航状态唯一所有者。主分页动画必须从真实当前页开始，禁止通过临时目标页制造过渡。
+- 分应用搜索由 Scaffold 的 `popupHost` 承载，仅搜索框参与上移动画；搜索层只展示搜索框与结果，代理模式只在普通页面展示，否则退出搜索时会随搜索框回位。普通列表不做位移动画，两份列表的滚动状态在内容切换之外持有，输入焦点不得跳过展开动画直接确认搜索状态。自定义 `popupHost` 仍须保留 `MiuixPopupHost`，否则页面下拉菜单无法显示。
+- 应用代理模式与搜索框位于同一固定顶部区域，不作为应用列表条目滚动；应用图标失效只触发后台重新加载，不清空已展示图标，缓存命中须直接用于首帧。
+- Miuix Nav 是页面导航状态唯一所有者。主分页动画必须从真实当前页开始，禁止通过临时目标页制造过渡。
 - 主分页底部导航由 `MainBottomBar` 单一实现统一承载；主题偏好不改变其结构或布局形态。
+- 模块 HTTPS 可连接性与身份由应用入口统一检查；未确认可用时不启动模块页面读取，仅保留仪表盘与设置导航。动态分页按目的地身份恢复，不沿用旧页码。受限页面保留标题和返回键，读取失败与真实空内容必须区分，并在 Scaffold 实际内容区居中展示；权限变化不得取消已开始的写事务或丢弃编辑草稿。
+- 管理器由 Android 原生资源自动匹配中文、英语和俄语，英文是默认资源；界面文案放入字符串资源，不自行保存或强制覆盖系统语言。补全与校验逻辑不得依据翻译后的文本判断类型或错误分类。
+- 路由规则表单只编辑现有 proxy/direct/block 本地规则集；多条件、logical、invert 和其他原生字段的规则保留原样并交给 JSON 编辑器，不能展开成多个单条件规则改变匹配语义。保存使用读取时的 revision，不为表单维护另一份规则数据库。
+- 默认 DNS 引用本地规则集时使用原生 `evaluate` / `match_response`，不能直接按旧式地址过滤引用；否则添加有效 IP 规则会触发内核弃用检查并使正在重载的核心退出。不得使用 `ENABLE_DEPRECATED_*` 绕过。
+- 路由规则合并列表必须以规则集和文件内索引共同定位条目；添加时选择目标规则集，编辑与删除已有规则不得因其他规则集存在相同索引而写错文件。合并展示不改变主配置中的规则匹配顺序。
 - `third_party/scripta` 是带来源记录的固定源码快照。修改其代码时保留来源、许可证和 NetProxy 扩展说明，不把它悄悄替换成浮动远程依赖。
-- `src/module/NetProxy.apk` 是独立维护的含管理器包发行资产。本地 Android 构建和普通 CI 不得自动覆盖它；标准包必须排除该 APK。
+- 模块包必须包含 `NetProxy.apk`，由独立 Android 任务通过共享 Action 从当前源码构建，并使用 GitHub Secrets 中的固定密钥签名；不得提交签名材料或手工维护该生成物。安装器不检查已安装版本，两处安装选择共用音量加循环、音量减确认；10 秒无操作默认执行 `pm install -r`，操作后 20 秒未确认取消安装；APK 安装失败不卸载应用或清除数据，也不阻塞模块安装。
 
 ## WebUI
 
@@ -95,21 +138,32 @@ src/module/service.sh
 ## 安全与生成物
 
 - 不提交订阅地址、节点凭据、UUID、密钥、HWID、自定义 Header、签名材料、设备日志或 `local.properties`。
-- 日志、历史和诊断包必须复用统一脱敏逻辑；修复问题时使用匿名 fixture，不把用户提供的真实链接写入测试。
+- 日志、历史和诊断包必须复用统一脱敏逻辑；诊断包内需要脱敏的 JSON 损坏时省略原文并注明原因，不能泄露无法识别的名单或凭据。修复问题时使用匿名 fixture，不把用户提供的真实链接写入测试。
 - 不手工修改 `src/module/bin/` 下的 `netproxyctl`、`sing-box`，也不手工修改 WebUI 构建目录或工作流生成的版本号。更新二进制和资源时使用对应构建/更新流程并核对来源。
+
+## 本地开发资料
+
+- 本地技能、方案、报告、验证产物与独立缓存统一放入 Git 忽略的 `.agents/`，不再创建仓库根级 `.tmp/` 或 `.codex/`；技能保持 `.agents/skills/` 的发现路径，工具安装记录 `skills-lock.json` 保留工具规定的位置。
+- `plans/` 保存待执行方案，`reports/` 保存结论，`runs/<日期>-<任务>-<标识>/` 保存日志、构建产物和证据；脚本使用独立运行目录，禁止多个任务覆盖同一套产物。历史资料只作证据，不取代本文件或当前源码。
+- `cache/` 只存可重建缓存；`assets/` 保存原稿与参考资料，不得自动清理。归档源码副本、设备证据及无法确认用途的文件须保留，清理前逐项确认；签名材料和访问密钥不放入此目录。工具原生的 `build/`、`node_modules/` 等生成目录不迁移。
 
 ## 验证
 
 每次改动至少运行 `git diff --check`，并按影响范围执行：
+
+本地可通过 `sh tests/verify.sh quick|webui|android|docs|full` 编排下列既有检查；它不自动暂存、提交或发布。WebUI 构建检查页面引用的本地资源是否完整，生成产物由 CI 打包，不纳入 Git。
+
+Host CLI 测试同时用 `NETPROXY_MODULE_DIR` 与 `NETPROXY_DEV_ROOT` 隔离持久目录和瞬态状态，避免写入系统 `/dev/netproxy` 或共享其他测试的服务锁；未设置后者时设备状态目录仍固定为 `/dev/netproxy`。
 
 ```sh
 # Go 原生组件
 (cd src/native/netproxy && go test ./... && go vet ./...)
 
 # Shell/Catalog 契约（先准备 netproxyctl 测试二进制）
-mkdir -p .tmp
-(cd src/native/netproxy && go build -o ../../../.tmp/netproxyctl ./cmd/netproxyctl)
-sh tests/runtime_catalog_test.sh ./.tmp/netproxyctl
+CHECK_DIR="$(pwd)/.agents/runs/manual-$$"
+mkdir -p "$CHECK_DIR"
+(cd src/native/netproxy && go build -o "$CHECK_DIR/netproxyctl" ./cmd/netproxyctl)
+sh tests/runtime_catalog_test.sh "$CHECK_DIR/netproxyctl"
 sh tests/module_scripts_test.sh
 sh tests/customize_hot_update_test.sh
 
@@ -157,19 +211,11 @@ Android Root、开机启动、模块命令、快捷设置磁贴、eBPF、热点�
 以下写法看起来不规范，但都是上一版已被证伪写法的替代品。不要以「重构」或「统一风格」为由改回去。
 
 - 分应用策略按 `<user-id>:<package>` 保存并在 Go 中按用户查询 UID——把多个 Android 用户合并成包名或直接把包名交给 sing-box 会在应用分身场景下静默漏配。
-- Service API 与 Clash API 使用 `02_experimental.json`、`08_services.json` 中的固定监听与密钥——改回运行时随机 bootstrap 会让 WebUI 连不上核心且无任何报错。
+- Service API 与 Clash API 使用主配置中 `services`、`experimental.clash_api` 的固定监听与密钥——改回运行时随机 bootstrap 会让 WebUI 连不上核心且无任何报错。
 - Android 依赖由 `AppContainer` 与 `NetProxyViewModelFactory` 手工构造——引入 Hilt/Koin 需先有全项目架构决策。
 - Provider 与 selector 的默认值必须落到 `Auto/<group>`——回退到 `direct` 会让用户以为已代理而实际直连。
-- `src/module/NetProxy.apk` 由独立流程维护——本地 Android 构建覆盖它会把调试包发进正式模块。
+- CI 与 Release 管理器 APK 使用同一固定签名；轮换密钥或改回临时签名会导致后续 APK 无法覆盖已安装版本。应用不按安装来源或签名证书限制使用，也不显示来源警告。
 - 订阅自定义请求头走 `--headers-file` 而非命令行参数——命令行对全系统可见（`/proc/<pid>/cmdline`），会泄露鉴权 token。
-- 导入 sing-box 完整配置时清除节点的 `domain_resolver`、`bind_interface`、`inet4_bind_address`、`inet6_bind_address`、`protect_path`、`netns` 和 `routing_mark`——原样保留会让 sing-box 启动时报 `domain resolver not found: <来源标签>`，或让节点在本机连不通而日志里没有对应错误。
-- 单个节点协议不受支持时只丢弃该节点并返回 diagnostics——整份 sing-box 文档解析失败会退到节点链接解析器，用户只看到一串 `missing URI scheme`，看不出真正原因。
-- 直通模式加载 `raw.json` 与 `08_services.json`，绝不能再带 `-C confdir`——sing-box 合并多份配置是数组追加而非覆盖，托管配置会和用户配置叠加出重复的 `inbounds`、`dns.servers` 和出站标签，核心起不来且报错指向用户配置。
-- `singbox/raw.json` 与 `singbox/raw.meta.json` 必须列进 `customize.sh` 的两份保留清单——漏掉会在模块更新后删掉直通配置却保留 `CONFIG_MODE=raw`，开机时服务直接起不来，直到用户手动重新下载。
-- 直通模式不得注入模块生成的 eBPF 入站——用户配置通常自带 `ebpf` 入站，追加一份会叠加成两个：tag 同为 `ebpf-in` 直接校验失败，tag 不同则两段 eBPF 程序抢同一批 TC 挂载点。抓取入口由用户配置声明。
-- 直通配置必须校验 `inbounds` 非空——没有入站的配置能通过 `sing-box check`、能正常 ready，但一个连接都不会被代理，日志里没有任何错误。
-- 直通配置必须先落候选文件、`sing-box check` 通过后再原子替换——直接覆盖会让一次坏更新在下次开机时才暴露，且没有可回退的上一版。
-- `config raw` 的子命令要分两段解析 flag——`moduleArgs` 把 `--module-dir` 插在子命令词之前，一次解析会在操作词处停下，`--interval` 之类的开关会被当成位置参数静默丢弃，用户看到的周期和实际保存的不一致。
 - 订阅请求的默认 User-Agent 是 `sing-box`——多数机场按 UA 白名单返回 `Subscription-Userinfo`，改成自定义 UA 会拿到 200 但没有流量信息。
 - 新增此类条款时写故障现象，不写设计理由：现象能阻止下一次回退，理由不能。
 
@@ -182,7 +228,7 @@ Android Root、开机启动、模块命令、快捷设置磁贴、eBPF、热点�
 
 # 架构参考
 
-以下记录 NetProxy 8.x 的事实源、状态机与契约细节，供按需查阅。上文的约束条款是这些契约的执行要求。
+以下记录当前 NetProxy 的事实源、状态机与契约细节，供按需查阅。上文的约束条款是这些契约的执行要求。
 
 ## 系统边界
 
@@ -190,30 +236,32 @@ Android Root、开机启动、模块命令、快捷设置磁贴、eBPF、热点�
 Android Manager ─┐
 WebUI ───────────┼─> netproxyctl ─> Go 业务层 ─> sing-box
 终端用户 ───────┘        │              │          │
-                         │              │          ├─> eBPF 入站运行时
+                         │              │          ├─> eBPF 或 TUN 入站运行时
                          │              │          └─> 网络事件采集
                          │              ├─> 节点、订阅、Provider、配置
-                         │              ├─> eBPF runtime 与 Service API
+                         │              ├─> 受管入站 runtime 与 Service API
                          │              └─> 后台 Worker
                          └─> schema=1 JSON 契约
 ```
 
-NetProxy 不维护通用独立控制守护进程。唯一长期 Go 进程是模块启动的 Worker，负责订阅调度、Android 网络事件和策略评估；`service.sh` 仅在模块 service 阶段通过 `su -c` 进入 Go，Go 负责 sing-box 生命周期、类型化配置、网络事务、Provider 与业务状态。
+唯一长期 Go 进程是模块启动的后台宿主，复用 Worker 进程身份，负责模块 HTTP API、订阅调度、Android 网络事件、策略评估和设备统计。HTTP 与 CLI 调用同一领域函数；`service.sh` 仅在模块 service 阶段通过 `su -c` 进入 Go。代理服务停止不关闭模块 API，错误的代理配置也不得阻断完整配置读取与修复入口。
 
 ## 事实源
 
 | 数据 | 唯一事实源 | 说明 |
 |---|---|---|
 | 模块版本 | `src/module/module.prop` | `versionCode` 由打包工作流写入 |
-| 模块设置 | `src/module/config/module.conf` | 保存活动分组、选择模式和出站模式 |
-| eBPF 设置 | `src/module/config/ebpf/ebpf.conf` | 由运行时生成 sing-box eBPF inbound |
+| 模块设置 | `src/module/config/module.json` | `auto_start`、`selection` 与 `wifi` |
+| 默认出站模式 | `config/singbox/config.json` 的 `experimental.clash_api.default_mode` | 可选模式来自 route/DNS 规则与默认模式；API 报告运行时实际模式 |
+| 设备统计队列 | `config/telemetry/state.json` | 每日去重和离线队列；设备身份由 Worker 从系统派生，不作为用户配置展示 |
+| 入站与应用策略 | `src/module/config/inbound/inbound.json` | backend、root_policy、app 与 eBPF/TUN 原生对象；只生成当前所选入站 |
 | 节点与订阅 | `src/module/data/catalog/<group-id>/` | `meta.json` + `provider.json` |
-| sing-box 静态配置 | `src/module/config/singbox/confdir/` | 按编号组合加载 |
-| sing-box 运行时配置 | `src/module/runtime/` | 启动或检查时生成，不由客户端编辑 |
+| sing-box 静态配置 | `src/module/config/singbox/config.json` | 单一主配置，支持整份或按顶层字段编辑 |
+| sing-box 运行时配置 | `src/module/runtime/` | inbound.json、providers.json、outbounds.json；可重建，不由客户端编辑或安装保留 |
 | 服务状态 | `/dev/netproxy/service.json` | 本次启动周期的状态快照；缺失时按 stopped 处理 |
 | 实时核心状态 | Service API / Clash API | 连接、流量、测速和实际选择 |
 
-Android 和 WebUI 不建立另一份节点数据库，也不直接修改这些文件。持久状态通过 `netproxyctl` 读取和变更，运行状态通过固定的 sing-box API 补充。
+Android 和 WebUI 不建立另一份节点数据库，也不直接修改这些文件。Android 的持久与运行状态通过模块 HTTPS API 读取和变更；终端 WebUI 通过 `netproxyctl` 与固定的 sing-box API 获取。
 
 ## Catalog 与 Provider
 
@@ -248,19 +296,22 @@ data/catalog/
 
 ## 选择状态
 
-`module.conf` 使用以下字段：
+`module.json` 的 `selection` 使用以下字段：
 
-```ini
-ACTIVE_GROUP_ID="default"
-SELECTOR_MODE=urltest
-SELECTED_NODE_REF=""
-OUTBOUND_MODE=rule
+```json
+{
+  "selection": {
+    "group_id": "default",
+    "node_tag": ""
+  }
+}
 ```
 
-- 自动模式下 `SELECTED_NODE_REF` 必须为空，实际选中节点由 Service API 报告。
-- 手动模式保存 `<group-id>/<tag>`，不保存文件路径。
+- `selection.node_tag` 为空使用同组 Auto，实际选中节点由 Service API 报告，不写回手动选择。
+- 手动模式仅保存当前分组节点的 tag，不重复保存分组 ID 或文件路径。
 - 手动节点在 Provider 更新后消失时回退该组 Auto。
-- 出站模式支持 `rule`、`global`、`direct` 和 `AllowAds`，客户端必须保持同一顺序和语义。
+- 公开命令仍使用 `node use auto [group]` 或 `node use <group-id>/<tag>`；JSON 的 `selector_mode` 与 `selected_node_ref` 是派生结果，不是另一个持久事实源。订阅更新在配置文件锁内读取最新选择后计算变更，不能覆盖并发用户选择。
+- 出站模式使用主配置与内核生成的原生列表；默认规则的模式值为 `Rule/Proxy/Direct/RuleAllowAds`，配置、CTL 和 API 使用同一名称，不提供旧名别名。客户端翻译已知模式的显示文案，自定义名称原样显示。模式切换保存默认值，当前 Wi-Fi 绕过策略仍可使实际模式为 `Direct`。
 
 ## 订阅事务
 
@@ -280,7 +331,11 @@ OUTBOUND_MODE=rule
 
 下载、转换和校验阶段可以取消，原子提交阶段不可取消。任何失败都保留上一版有效 Provider 和当前选择。核心 ready 时可按设置经本地代理下载；核心停止或代理下载失败时，`auto` 策略允许直连重试。
 
+HTTP 验证器只跟随已接受的 Provider 更新：失败保留原 ETag/Last-Modified，成功 200 替换或清空，304 只更新实际返回的值。跨域后的整个重定向链不得重新携带初始敏感 Header，HTTPS 降级与超过跳数限制均拒绝，不触发直连重试。
+
 Worker 根据各订阅的 `next_update_at` 调度，不依赖 sing-box 和 `crond`；同时通过 netlink 监听 Android 路由、地址和接口变化，再读取 Wi-Fi 与实际出口状态进行策略评估，不得改回文件或定时轮询。运行时进度放在 `/dev/netproxy/subscriptions/`，完成后不作为长期 UI 状态显示。
+
+失败退避按分组独立计算，正常调度和重试取最早截止时间；每轮读取最新启用状态，关闭自动更新或删除分组后丢弃重试。退避仅保存在 Worker 内存，配置唤醒重新计算调度但不提前重试失败分组。
 
 订阅响应头的解析要点：`Subscription-Userinfo` 提供流量与到期，空值（如 `expire=`）表示不适用而非畸形；`Profile-Title` 可能带 `base64:` 前缀或 RFC 2047 编码；`Content-Disposition` 的 `filename` 可能是 RFC 5987 形式，也可能直接携带原始 UTF-8 字节。
 
@@ -296,35 +351,55 @@ stopped -> preparing -> starting -> ready -> stopping -> stopped
 启动流程：
 
 1. 校验二进制、静态配置、Catalog 和活动选择。
-2. 生成 providers、outbounds 与 eBPF runtime 配置。
+2. 生成 providers、outbounds 与唯一 inbound runtime 配置。
 3. 运行 sing-box 配置检查。
-4. 启动 sing-box 并等待 Service API 与 eBPF 入站就绪。
-5. 写入 `ready_at`，客户端从此时开始显示完整运行时间。
+4. 启动 sing-box 并等待 Service API 与当前所选入站就绪，记录实际 backend 与实例身份。
+5. 校准实际出站模式，消除缓存覆盖并应用当前网络策略，再写入 `ready_at`。
 
-eBPF 只负责透明代理入站。停止服务由 sing-box 关闭并清理其 eBPF 程序、Map 和 TC 挂载。
+eBPF 与 TUN 只负责透明代理入站。停止服务由 sing-box 关闭并清理当前入站的程序、Map、TC 挂载或 TUN 与路由规则；PID 消失不代表接管资源必然清理。切换不新增 switching 状态，也不创建第二个核心或 Worker。
 
-节点测速不要求正式服务处于 `ready`。服务停止时，Native 只允许启动不含入站、eBPF 和 Clash API 的短生命周期 sing-box 会话，使用目标 Provider 快照与随机 loopback Service API 完成测速；会话不得修改正式服务状态、选择状态或 Worker，结束和取消时必须清理进程与临时文件。
+节点测速不要求正式服务处于 `ready`。服务停止时，Native 只允许启动不含透明代理入站、eBPF/TUN 和 Clash API 的短生命周期 sing-box 会话，使用目标 Provider 快照与随机 loopback Service API 完成测速；会话不得修改正式服务状态、选择状态或 Worker，结束和取消时必须清理进程与临时文件。
 
-分应用配置保存 `<user-id>:<package>`，Go eBPF 运行时生成器通过 Android package service 查询 UID 后生成 `include_uid` 或 `exclude_uid`。应用安装、重装、UID 变化或用户范围变化后，通过配置 reload 重新解析，不维护模块侧 UID 缓存；白名单自动包含 UID 0。
+分应用配置保存在入站文件的 `app` 对象，`proxy_apps` 与 `bypass_apps` 是严格 `<user-id>:<package>` 字符串数组。Go 通过 Android package service 按用户查询 UID 后合并到所选入站本机的 `include_uid` 或 `exclude_uid`，不写回原生模板。应用安装、重装、UID 变化或用户范围变化后，通过重启或配置 reload 重新解析，不维护模块侧 UID 缓存；不自动加入 UID 0。app 命令和 app 分区保存均通过配置事务应用有效变化，失败回滚；关闭策略、未使用名单或仅 eBPF 共享路径的无效变化不 reload。
 
-本机默认出口与热点下游接口由 `EBPF_MODE` 选择。`local` 只输出 local 字段，`shared` 只输出 shared 字段，`hybrid` 同时输出两者；两条数据路径均由 sing-box 管理 TC attachment，`shared` 与 `hybrid` 必须配置至少一个下游接口。
+app 关闭时保留原生 UID 筛选；开启时合并去重同向 UID/range，保留反向 UID/range 并由内核按排除优先处理，非空原生 package/user 筛选仍拒绝混用。白名单解析后与原生 include UID/range 均为空时，仅在运行时设置 `exclude_uid_range=["0:4294967294"]` 排除全部有效 UID；不能生成空 include 后静默变为全量接管，也不能注入占位 UID。仅启用 eBPF 共享网络时不查询应用 UID，不把本机应用名单当成热点客户端过滤器；eBPF DNS 保持原生 hijack/respect_policy/off 语义，不因应用名单覆盖 DNS 模式。
+
+eBPF 本机与热点下游接管分别由 `local.enabled`、`shared.enabled` 控制。本机默认使用 cgroup socket hook 与 `respect_policy` DNS，也可选择跟随默认接口的 TC；共享网络默认关闭，保存以太网 `packet_rewrite`、`hijack` DNS 与 `wlan2` 接口偏好，raw-IP、PPP 或隧道接口可选择 `socket_assign`。启用共享网络时必须配置至少一个下游接口。
+
+TUN 使用原生 `include_interface/exclude_interface`、CIDR、规则集与 MAC 筛选，不建立 local/shared/hybrid 映射。默认接口 `netproxy`、地址 `172.19.0.1/30` 与 `fdfe:dcba:9876::1/126`、DNS `hijack`；不输出 stack 或额外默认 MTU/strict_route/marks。目标 sing-box check 不等于设备能力证明，TUN、NFQUEUE、IPv6 TPROXY 与清理仍需真机确认。eBPF 能力探测继续使用 `ebpf status`，不新增 `tun status`。
 
 ## sing-box 配置组合
 
-Go 生命周期控制器通过 `-C config/singbox/confdir` 加载静态配置，并追加运行时文件：
+Go 生命周期控制器通过 `-c config/singbox/config.json` 加载静态配置，并追加运行时文件：
 
 - `providers.json`：Catalog Local Provider 投影。
 - `outbounds.json`：Auto/Select/Proxy 出站图。
-- `ebpf.json`：由 `ebpf.conf` 生成的透明代理入站。
+- `inbound.json`：由 `config/inbound/inbound.json` 当前后端生成的唯一受管透明代理入站。
 
-`confdir` 中的编号文件按职责拆分：日志、实验特性/Clash API、DNS、用户入站、路由、HTTP Client 和 Service API。运行时文件由脚本生成，用户配置编辑器只能修改受管理的静态文档。
+完整配置直通模式只加载 `config/singbox/raw.json`，不合并上述受管配置；下载先通过同一 sing-box 检查，再原子替换，更新失败保留旧配置。来源与调度记录保存在同目录，随完整配置目录一起保留。直通配置可能不包含 Service API，`running` 只代表进程存活，不代表入站就绪。
+
+主配置包含日志、实验特性/Clash API、DNS、用户入站、路由、HTTP Client 和 Service API。Android 的分区是 `config list` 返回的逻辑文档，不对应额外磁盘文件；完整编辑入口保留所有受核心支持的字段。运行时文件由 Go 生成并只读展示。
+
+`config read` 返回 `content` 和 `revision`；`config apply/validate --revision <值> <目标> <候选文件>` 检测并发修改。`singbox/dns` 等分区使用带顶层键的 JSON，空对象删除该字段；`singbox/config.json` 替换整份主配置。保存后的 revision 对应本次实际写入内容，不通过无锁重新读取生成。
+
+模块目标 `module` 读取或替换完整 `auto_start/selection/wifi` JSON；`module/wifi` 与 `module/auto_start` 分别使用 `{"wifi": {...}}`、`{"auto_start": true}`。完整 revision 跟踪整个文件，分区 revision 只跟踪所属分区，不受节点选择或其他分区变更影响。同分区冲突返回 `config.conflict`；分区不能删除或包含其他顶层字段，写入只在 `module.json.lock` 内合并最新文件，保护 `selection`，不维护第二份配置或旧格式别名。
+
+入站目标 `inbound` 替换完整五字段包装；`inbound/backend`、`inbound/root_policy`、`inbound/app`、`inbound/ebpf`、`inbound/tun` 分别使用对应顶层键。分区 revision 只跟踪该分区，完整 revision 跟踪整个文件；入站分区不支持空对象删除，所有写入在同一个配置文件锁内合并最新其他字段。
+
+`config list` 的六个入站逻辑目标归类为 `category=inbound`；Prepare JSON 使用 `providers/outbounds/inbound` 路径字段与 `backend`，不保留旧 `ebpf` 路径字段。schema=1 字段与类别变化需同步 Shell、Go、Android、WebUI 与 tests。
+
+安装只处理当前数据布局，不读取、转换或清理旧版配置。保留现有数据包含整个用户配置目录（包括核心持久状态）、Catalog 与日志，但 `config/singbox/rules/remote` 始终使用本次安装包的内置规则；仅保留节点与订阅包含 Catalog 与日志；全新安装使用包内默认内容。保留模式要求对应数据完整，不能因缺失而静默回退默认配置。热切换前重新复制最新数据，不复制 Catalog staging 或可重建的运行时文件。
+
+保留全数据缺少当前 `config/module.json` 或 `config/inbound/inbound.json` 时明确失败；旧格式用户只能选择仅保留节点或全新安装，不检查版本、不读取或转换旧格式。快照锁固定顺序为生命周期、inbound、module、sing-box 主配置，再按既有统计和 Catalog 锁执行；目录切换保留 `config/inbound/inbound.json.lock`、`config/module.json.lock`、主配置与 Catalog 锁 inode。
+
+安装快照与目录切换使用 Go 的生命周期、配置文件和 Catalog OS 锁，分组锁先于根锁；任一锁忙立即中止。Android mksh 调用外部 `flock` 时必须显式传递锁描述符（如 `9>&9`），否则会因 `Bad file descriptor` 回退。目录切换必须保留锁文件 inode，否则等待中的 Go 命令会与新命令使用两套锁。前台准备不停止服务，后台停服或切换失败尝试恢复提交前的 Worker 与服务；原先停止的服务不得自动开启。
 
 当前控制入口是稳定产品契约：
 
 | 接口 | 本机客户端地址 | 用途 |
 |---|---|---|
 | Service API | `127.0.0.1:9090` | 核心状态、流量、节点组、选择和测速 |
-| Clash API | `127.0.0.1:9999` | zashboard 与第三方 Clash 客户端 |
+| Clash API | `127.0.0.1:9999` | 第三方 Clash 客户端 |
 | 模块 WebUI | 模块管理器 WebView | 持久管理与状态展示 |
 
 静态配置默认只监听 `127.0.0.1`，本机客户端统一通过 loopback 访问；配置文件使用固定密钥 `singbox`，用于 WebUI 自动进入面板。需要 LAN 控制时必须显式修改监听范围并同步评估鉴权和网络安全影响，不能只改一端。
@@ -351,11 +426,11 @@ Go 生命周期控制器通过 `-C config/singbox/confdir` 加载静态配置，
 - 敏感读取命令只能由 Root 客户端调用，普通列表只返回安全摘要。
 - 写操作使用稳定退出码，并保证 JSON 中 `ok` 与进程退出状态一致。
 
-`netproxyctl __internal` 只供模块生命周期内部使用。Android/WebUI 只能调用公开命令组，以免形成两套公共契约。
+`netproxyctl __internal` 只供模块生命周期内部使用。终端 WebUI 只能调用公开命令组；Android 只能调用模块 API，以免形成两套公共契约。
 
 ## 客户端边界
 
-**Android**：按 `core/`、`feature/`、`navigation/` 组织。每个功能域拥有自己的 Repository、ViewModel 和 UI state；应用级长生命周期依赖由 `AppContainer` 组合。Root 命令只从 `NetProxyCtlClient` 发出，页面不拼接 Shell。底部一级入口为「仪表盘 / 节点 / 订阅 / 设置」。
+**Android**：按 `core/`、`feature/`、`navigation/` 组织。每个功能域拥有自己的 Repository、ViewModel 和 UI state；应用级长生命周期依赖由 `AppContainer` 组合。模块业务只从 `ModuleApiClient` 发出，页面不读取模块路径或执行 Shell。底部一级入口为「仪表盘 / 节点 / 订阅 / 设置」。
 
 **WebUI**：终端式界面，Root 命令经 `src/exec.ts` 统一发出。开发环境可以提供 mock，但 mock 不得改变生产契约或掩盖非零退出状态。
 
@@ -363,10 +438,18 @@ Go 生命周期控制器通过 `-C config/singbox/confdir` 加载静态配置，
 
 ## 构建与发布
 
-- 构建动作先测试并交叉编译 `netproxyctl`，再构建 WebUI，最后打包模块。
-- 标准包不包含 `NetProxy.apk`；文件名带 `_with-manager` 的包仅额外携带该 APK，代理能力保持一致。
-- Android 管理器不由普通模块 CI 构建或发布，Google Play 是推荐更新渠道；内置 APK 为无 Play 环境保留。
-- `update-resources.yml` 统一维护内核、规则、Web 资源、Go/npm/Gradle/Android 依赖；高风险或大版本更新进入报告，不自动静默升级。
+- CI 与 Release 共用 `build-module.yml` 的并行任务图；模块任务完成 Go/Shell 验证、`netproxyctl`、WebUI 与内容压缩，Android 任务构建当前源码的 APK 与框架辅助 DEX，并用固定密钥签名 APK；打包同时校验辅助程序固定的公开证书指纹。共享工作流等待两者成功后汇合为唯一模块包，发布任务只下载最终产物，不重新编译或打包。Android 源码变化必须触发模块重打包；任一构建或所需验证失败均不得发布。
+- `verify.yml` 面向 Pull Request 与手动源码验证，只读取公开源码并按变更范围执行 Native、WebUI、Android 或文档检查；它不得读取签名、发布、Telegram 或统计 Secrets，不得打包、上传或发布产物。只有 `main` 上的 `ci.yml` 和 tag 发布工作流可以构建签名管理器与模块包。
+- CI 变更范围从同分支上次成功验证的提交计算，不能只比较本次 push：前一轮被取消或失败的改动仍须验证；基线不可用时执行全部检查。
+- 版本计数与更新日志所需的 checkout 保留完整提交历史；可使用 `blob:none` 或稀疏检出减少历史文件下载。
+- 主仓库只发布 `NetProxy_<版本>_<构建号>.zip`，必须包含本次构建的管理器 APK。APK 只在首次解压检查时必需，用户安装或跳过后均清理，热切换校验不得要求它仍然存在。
+- 模块使用 ZIP 容器和 XZ 9 压缩，根目录唯一的 `module.prop` 必须使用 Store，供 KernelSU 索引读取；汇合任务以 Store 追加 APK 与 `bin/android-platform.dex`，不复制第二份发行包。CI 上传归档时不再进行外层压缩。
+- KernelSU 仅从公开 `Fanju6/NetProxy-Releases` 分发不可变正式版本，源码和可变 nightly 留在主仓库；不镜像源码、全部标签或历史 Release。根目录 `module.yaml` 与 `.github/kernelsu/` 是展示元数据，不是设备上的 `config/module.json`。正式发布先经过官方 Action 预检，主仓库发布后分发同一 ZIP；分发资源按官方规则命名 `netproxy-<构建号>-<版本>.zip`，摘要必须一致。
+- `publish-kernelsu.yml` 重试只下载既有主仓库正式 Release，不重新构建。已发布的分发版本只能验证不可变状态和摘要，不能覆盖、删除或移动 tag；分发失败不能冒充主仓库发布失败。`DIST_REPO_TOKEN` 仅有分发仓库 Contents 读写和 Administration 只读权限，资源更新使用仅限主仓库的 `RESOURCE_UPDATE_TOKEN`，两者不能互用。
+- Android 受影响时，CI 在管理器构建任务中使用同一次 Gradle 调用执行单元测试、Lint 与 Release 构建；仅需模块打包时仍构建当前管理器，不额外执行 Android 验证。资源维护复用纯验证模式，不构建 APK，也不需要签名密钥。固定签名由 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD` 四个 GitHub Secrets 注入；缺失时构建失败，不生成替代密钥。CI 版本名保留提交短哈希，仅用于区分构建。
+- Release 只能从与 `src/module/module.prop` 的 `version=` 和 `docs/changelog.md` 对应章节完全一致的 `v<版本号>` tag 启动；预检失败时不得开始签名构建或创建 Release。
+- `update-resources.yml` 统一维护内核、规则、Web 资源、Go/npm/Gradle/Android 依赖；规则与 Web 资源属于内容更新，sing-box 属于核心更新，工具链大版本进入报告。GitHub Actions 更新只报告、不由定时任务静默改写。
+- Composite Action 的仓库 Variables 由调用工作流通过 inputs 显式传入；在 Action 清单中直接读取 `vars` 会导致 Runner 加载失败，尚未开始构建就退出。
 
 ## 安全边界
 

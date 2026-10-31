@@ -11,20 +11,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AppRegistration
+import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.ContactPage
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Router
+import androidx.compose.material.icons.automirrored.rounded.AltRoute
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
@@ -32,8 +31,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fanjv.netproxy.R
 import com.fanjv.netproxy.core.di.netProxyViewModel
 import com.fanjv.netproxy.core.ui.component.BlurredBar
+import com.fanjv.netproxy.core.ui.component.LocalModuleAvailability
 import com.fanjv.netproxy.core.ui.component.CardItem
-import com.fanjv.netproxy.core.ui.component.groupedCardItems
+import com.fanjv.netproxy.core.ui.component.groupedCardSection
 import com.fanjv.netproxy.core.ui.component.rememberBlurBackdrop
 import com.fanjv.netproxy.navigation.LocalNavigator
 import com.fanjv.netproxy.navigation.Route
@@ -56,18 +56,17 @@ internal fun SettingsScreen(
     viewModel: SettingsViewModel = netProxyViewModel()
 ) {
     val settings by viewModel.state.collectAsStateWithLifecycle()
+    val available = LocalModuleAvailability.current?.available == true
     val navigator = LocalNavigator.current
-    val context = LocalContext.current
-    val resources = LocalResources.current
 
     val scrollBehavior = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop()
     val blurActive = backdrop != null
     val barColor = if (blurActive) Color.Transparent else colorScheme.surface
 
-    LifecycleResumeEffect(isActive) {
-        viewModel.setVisible(isActive)
-        onPauseOrDispose { if (isActive) viewModel.setVisible(false) }
+    LifecycleResumeEffect(isActive, available) {
+        viewModel.setVisible(isActive && available)
+        onPauseOrDispose { if (isActive && available) viewModel.setVisible(false) }
     }
 
 
@@ -94,14 +93,14 @@ internal fun SettingsScreen(
                 contentPadding = innerPadding,
                 overscrollEffect = null,
             ) {
-                groupedCardItems(
+                groupedCardSection(
                     keyPrefix = "settings_entries",
-                    outerTopPadding = 12.dp,
+                    title = { stringResource(R.string.settings_section_proxy) },
                     items = listOf(
-                        CardItem("proxy") {
+                        CardItem("inbound") {
                             ArrowPreference(
-                                title = stringResource(R.string.proxy_settings),
-                                summary = stringResource(R.string.proxy_settings_summary),
+                                title = stringResource(R.string.inbound_settings),
+                                summary = stringResource(R.string.inbound_settings_summary),
                                 startAction = {
                                     Icon(
                                         imageVector = Icons.Rounded.Router,
@@ -110,7 +109,33 @@ internal fun SettingsScreen(
                                         tint = colorScheme.onBackground
                                     )
                                 },
-                                onClick = { navigator.push(Route.ProxySettings) }
+                                onClick = { navigator.push(Route.InboundSettings) }
+                            )
+                        },
+                        CardItem("network") {
+                            ArrowPreference(
+                                title = stringResource(R.string.network_matching),
+                                summary = stringResource(R.string.network_matching_summary),
+                                startAction = {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Wifi,
+                                        contentDescription = null,
+                                        modifier = Modifier.padding(end = 6.dp),
+                                        tint = colorScheme.onBackground
+                                    )
+                                },
+                                onClick = { navigator.push(Route.NetworkMatching) }
+                            )
+                        },
+                        CardItem("routing") {
+                            ArrowPreference(
+                                title = stringResource(R.string.routing_rules),
+                                summary = stringResource(R.string.routing_rules_summary),
+                                startAction = {
+                                    Icon(Icons.AutoMirrored.Rounded.AltRoute, contentDescription = null,
+                                        modifier = Modifier.padding(end = 6.dp), tint = colorScheme.onBackground)
+                                },
+                                onClick = { navigator.push(Route.RoutingRules) }
                             )
                         },
                         CardItem("kernel") {
@@ -128,29 +153,14 @@ internal fun SettingsScreen(
                                 onClick = { navigator.push(Route.KernelSettings) }
                             )
                         },
-                        CardItem("apps") {
-                            ArrowPreference(
-                                title = stringResource(R.string.proxy_apps),
-                                summary = stringResource(R.string.proxy_mode_summary),
-                                startAction = {
-                                    Icon(
-                                        imageVector = Icons.Rounded.AppRegistration,
-                                        contentDescription = null,
-                                        modifier = Modifier.padding(end = 6.dp),
-                                        tint = colorScheme.onBackground
-                                    )
-                                },
-                                onClick = { navigator.push(Route.Apps) }
-                            )
-                        },
                     ),
                 )
 
-                groupedCardItems(
-                    keyPrefix = "settings_module",
-                    outerTopPadding = 12.dp,
-                    items = listOf(
-                        CardItem("autoStart") {
+                groupedCardSection(
+                    keyPrefix = "settings_general",
+                    title = { stringResource(R.string.settings_section_general) },
+                    items = buildList {
+                        if (available) add(CardItem("autoStart") {
                             SwitchPreference(
                                 title = stringResource(R.string.auto_start),
                                 summary = stringResource(R.string.auto_start_summary),
@@ -163,17 +173,11 @@ internal fun SettingsScreen(
                                     )
                                 },
                                 checked = settings.autoStartEnabled,
+                                enabled = settings.hasLoaded,
                                 onCheckedChange = { viewModel.setAutoStartEnabled(it) }
                             )
-                        },
-                    ),
-                )
-
-                groupedCardItems(
-                    keyPrefix = "settings_theme",
-                    outerTopPadding = 12.dp,
-                    items = listOf(
-                        CardItem("theme") {
+                        })
+                        add(CardItem("theme") {
                             ArrowPreference(
                                 title = stringResource(R.string.settings_theme),
                                 summary = stringResource(R.string.settings_theme_summary),
@@ -187,13 +191,13 @@ internal fun SettingsScreen(
                                 },
                                 onClick = { navigator.push(Route.ThemeSettings) }
                             )
-                        },
-                    ),
+                        })
+                    },
                 )
 
-                groupedCardItems(
+                groupedCardSection(
                     keyPrefix = "settings_support",
-                    outerTopPadding = 12.dp,
+                    title = { stringResource(R.string.settings_section_support) },
                     outerBottomPadding = 12.dp,
                     items = listOf(
                         CardItem("logs") {

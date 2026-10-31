@@ -21,7 +21,7 @@ func ReadGroupSummary(ctx context.Context, root, groupID, progressDir string) (G
 	if err := ctx.Err(); err != nil {
 		return GroupSummary{}, err
 	}
-	release, err := acquireCatalogRootAndRecover(root)
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return GroupSummary{}, err
 	}

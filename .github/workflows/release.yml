@@ -8,33 +8,104 @@ on:
 
 permissions:
   contents: write
-  actions: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    name: 构建并发布 Release
+  preflight:
+    name: 验证发布版本与更新日志
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
-      - name: 拉取代码
+      - name: 拉取发布元数据
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          sparse-checkout: |
+            .github/scripts
+            docs
+            src/module/module.prop
 
-      - name: 构建并打包模块
-        id: pack
-        uses: ./.github/actions/build-module
+      - name: 配置发布脚本 Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: 检查 tag、模块版本与更新日志
+        env:
+          TAG: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          test "$REF_TYPE" = tag || {
+            echo '发布工作流只能从已有的 v<版本号> tag 运行。' >&2
+            exit 1
+          }
+          node .github/scripts/release-preflight.mjs \
+            src/module/module.prop docs/changelog.md "$TAG"
+
+  build:
+    name: 并行构建模块与管理器
+    needs: preflight
+    uses: ./.github/workflows/build-module.yml
+    secrets:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+  release:
+    name: 发布 Release
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      COMMIT_COUNT: ${{ needs.build.outputs.commit_count }}
+      MODULE_NAME: ${{ needs.build.outputs.module_name }}
+    steps:
+      - name: 拉取发布脚本与更新日志
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            .github/scripts
+            docs
+            .github/kernelsu
+
+      - name: 配置发布脚本 Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: 下载本次运行的完整模块包
+        uses: actions/download-artifact@v8
+        with:
+          name: module-package
+
+      - name: 校验模块包与发布身份
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node .github/scripts/prepare-kernelsu.mjs check "$TAG" "$MODULE_NAME" "$COMMIT_COUNT"
+
+      - name: KernelSU 分发预检
+        uses: KernelSU-Modules/tools/actions/module-release@ca1187c92135b3c31e48d37e008d61153120a08b
+        with:
+          zip: ${{ env.MODULE_NAME }}
+          tag: ${{ github.ref_name }}
+          repository: Fanju6/NetProxy-Releases
+          token: ${{ secrets.DIST_REPO_TOKEN }}
+          require-immutable: true
+          dry-run: true
 
       - name: 生成模块自更新清单
         env:
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-          COMMIT_COUNT: ${{ steps.pack.outputs.commit_count }}
-          STANDARD_NAME: ${{ steps.pack.outputs.standard_name }}
         run: |
           jq -n \
             --arg version "Module ${TAG}" \
             --argjson versionCode "${COMMIT_COUNT}" \
-            --arg zipUrl "https://github.com/${REPO}/releases/download/${TAG}/${STANDARD_NAME}" \
+            --arg zipUrl "https://github.com/${REPO}/releases/download/${TAG}/${MODULE_NAME}" \
             --arg changelog "https://raw.githubusercontent.com/${REPO}/refs/heads/main/docs/changelog.md" \
             '{version: $version, versionCode: $versionCode, zipUrl: $zipUrl, changelog: $changelog}' \
             > update.json
@@ -44,7 +115,7 @@ jobs:
         run: |
           node .github/scripts/extract-release-notes.mjs \
             docs/changelog.md \
-            "${{ steps.pack.outputs.version }}" \
+            "$VERSION" \
             "$RUNNER_TEMP/release-notes.md"
 
       - name: 发布 GitHub Release
@@ -52,55 +123,73 @@ jobs:
         with:
           body_path: ${{ runner.temp }}/release-notes.md
           files: |
-            ${{ steps.pack.outputs.standard_name }}
-            ${{ steps.pack.outputs.manager_name }}
+            ${{ env.MODULE_NAME }}
             update.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Telegram 通知：本仓库未配置 TG_BOT_TOKEN / TG_CHAT_ID，
-      # 启用会让整个 run 在此步骤失败。补上 secrets 后取消注释即可。
-#       - name: 发布通知到 Telegram
-#         uses: cbrgm/telegram-github-action@v1
-#         with:
-#           token: ${{ secrets.TG_BOT_TOKEN }}
-#           to: ${{ secrets.TG_CHAT_ID }}
-#           thread-id: 2343
-#           parse-mode: markdown
-#           message: |
-#             **新版本发布通知**
-#
-#             版本: `${{ github.ref_name }}`
-#
-#             [查看更新日志并下载](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }})
-#
-#             **直接下载:**
-#             [标准包](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.pack.outputs.standard_name }})
-#             [含管理器包](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.pack.outputs.manager_name }})
+      - name: 发布通知到 Telegram
+        continue-on-error: true
+        uses: cbrgm/telegram-github-action@v1
+        with:
+          token: ${{ secrets.TG_BOT_TOKEN }}
+          to: ${{ secrets.TG_CHAT_ID }}
+          thread-id: 2343
+          parse-mode: markdown
+          message: |
+            **新版本发布通知**
 
-      # 同步到 KernelSU 仓库是上游的分发流程，本仓库已禁用该工作流；
-      # 保留此步骤会让 gh workflow run 找不到目标而使整个发布失败。
-#       - name: 触发同步到 KernelSU 仓库
-#         if: github.ref_type == 'tag'
-#         env:
-#           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-#         # release:published 由 GITHUB_TOKEN 创建，受防递归限制不会自动触发 sync 工作流；
-#         # 故在此显式 dispatch（workflow_dispatch 是该限制的官方例外，GITHUB_TOKEN 可触发）。
-#         run: gh workflow run sync-kernelsu.yml
+            版本: `${{ github.ref_name }}`
 
-      # Telegram 通知：本仓库未配置 TG_BOT_TOKEN / TG_CHAT_ID，
-      # 启用会让整个 run 在此步骤失败。补上 secrets 后取消注释即可。
-#       - name: 失败通知
-#         if: failure()
-#         uses: cbrgm/telegram-github-action@v1
-#         with:
-#           token: ${{ secrets.TG_BOT_TOKEN }}
-#           to: ${{ secrets.TG_CHAT_ID }}
-#           thread-id: 2275
-#           parse-mode: markdown
-#           message: |
-#             **发布工作流执行失败！**
-#
-#             标签: `${{ github.ref_name }}`
-#
-#             [点击查看构建日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            [查看更新日志并下载](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ github.ref_name }})
+
+            **直接下载:**
+            [模块包](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.MODULE_NAME }})
+
+  kernelsu:
+    name: 分发至 KernelSU Modules
+    needs: release
+    uses: ./.github/workflows/publish-kernelsu.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      DIST_REPO_TOKEN: ${{ secrets.DIST_REPO_TOKEN }}
+
+  distribution-failure:
+    name: 通知独立分发失败
+    needs: [release, kernelsu]
+    if: always() && needs.release.result == 'success' && needs.kernelsu.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: 分发失败通知
+        uses: cbrgm/telegram-github-action@v1
+        with:
+          token: ${{ secrets.TG_BOT_TOKEN }}
+          to: ${{ secrets.TG_CHAT_ID }}
+          thread-id: 2275
+          message: |
+            主仓库 ${{ github.ref_name }} 已发布，KernelSU 分发失败。
+            请单独重试 KernelSU 正式版分发工作流，无需重新构建或发布主仓库。
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+  failure:
+    name: 通知构建或发布失败
+    needs: [preflight, build, release]
+    if: always() && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 失败通知
+        uses: cbrgm/telegram-github-action@v1
+        with:
+          token: ${{ secrets.TG_BOT_TOKEN }}
+          to: ${{ secrets.TG_CHAT_ID }}
+          thread-id: 2275
+          parse-mode: markdown
+          message: |
+            **发布工作流执行失败！**
+
+            标签: `${{ github.ref_name }}`
+
+            [点击查看构建日志](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

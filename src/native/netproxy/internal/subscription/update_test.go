@@ -52,7 +52,7 @@ func TestUpdateAndNotModified(t *testing.T) {
 		Timeout:        5,
 		Usage:          jsontext.Value("null"),
 	}
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	if err := provider.WriteAtomic(filepath.Join(groupDir, "provider.json"), []byte("{\"outbounds\":[]}\n"), 0o600); err != nil {
@@ -72,7 +72,7 @@ func TestUpdateAndNotModified(t *testing.T) {
 	if result.NotModified || result.NodeCount != 1 || result.Revision != 1 {
 		t.Fatalf("首次更新结果异常: %+v", result)
 	}
-	updated, err := catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	updated, err := catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestUpdateDoesNotHoldCatalogRootDuringDownload(t *testing.T) {
 		if groupID == "other" {
 			metadata.URL = "https://other.invalid/sub"
 		}
-		if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+		if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 			t.Fatal(err)
 		}
 		if err := provider.WriteAtomic(filepath.Join(groupDir, "provider.json"), []byte(`{"outbounds":[]}`+"\n"), 0o600); err != nil {
@@ -152,7 +152,7 @@ func TestUpdateDoesNotHoldCatalogRootDuringDownload(t *testing.T) {
 
 	readDone := make(chan error, 1)
 	go func() {
-		_, err := catalog.LoadMetadata(filepath.Join(root, "other", "meta.json"), "other")
+		_, err := catalog.LoadMetadata(context.Background(), filepath.Join(root, "other", "meta.json"), "other")
 		readDone <- err
 	}()
 	select {
@@ -193,7 +193,7 @@ func TestUpdateRejectsMetadataChangeBeforeCommit(t *testing.T) {
 	metadata := catalog.NewMetadata(groupID, groupID, "subscription", server.URL, now)
 	metadata.UpdateViaProxy = "never"
 	metadata.Timeout = 5
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	oldProvider := []byte(`{"outbounds":[{"type":"socks","tag":"old-node","server":"127.0.0.1","server_port":1080}]}` + "\n")
@@ -261,7 +261,7 @@ func TestUpdateRejectsEmptyProviderWithoutReplacingPrevious(t *testing.T) {
 	defer server.Close()
 
 	metadata := catalog.Metadata{Schema: 1, ID: groupID, Name: "Fixture", Type: "subscription", URL: server.URL, Timeout: 5}
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	oldProvider := []byte("{\"outbounds\":[{\"type\":\"socks\",\"tag\":\"old-node\",\"server\":\"127.0.0.1\",\"server_port\":1080}]}\n")
@@ -299,7 +299,7 @@ func TestUpdateFallsBackToDirectWhenConfiguredProxyFails(t *testing.T) {
 		Schema: 1, ID: groupID, Name: "Fallback", Type: "subscription", URL: server.URL,
 		Timeout: 5, UpdateViaProxy: "auto",
 	}
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	if err := provider.WriteAtomic(filepath.Join(groupDir, "provider.json"), []byte(`{"outbounds":[]}`+"\n"), 0o600); err != nil {
@@ -343,7 +343,7 @@ func TestUpdateRejectsRedirectWithStructuredError(t *testing.T) {
 	}))
 	defer source.Close()
 
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), catalog.Metadata{
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), catalog.Metadata{
 		Schema: 1, ID: groupID, Name: "Redirect", Type: "subscription", URL: source.URL,
 		AllowInsecure: true, HWID: "hwid-secret", CustomHeaders: map[string]string{"X-Vendor-Token": "token-secret"},
 		Timeout: 5,
@@ -387,7 +387,7 @@ func TestCancelledUpdateKeepsPreviousProvider(t *testing.T) {
 		_, _ = writer.Write([]byte(`{"outbounds":[{"type":"socks","tag":"new-node","server":"127.0.0.1","server_port":1080}]}`))
 	}))
 	defer server.Close()
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), catalog.Metadata{
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), catalog.Metadata{
 		Schema: 1, ID: groupID, Name: "Cancelled", Type: "subscription", URL: server.URL, Timeout: 5,
 	}); err != nil {
 		t.Fatal(err)
@@ -485,7 +485,7 @@ func TestCancelMarkerInterruptsInFlightUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldProvider := []byte(`{"outbounds":[{"type":"socks","tag":"old-node","server":"127.0.0.1","server_port":1080}]}` + "\n")
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), catalog.Metadata{
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), catalog.Metadata{
 		Schema: 1, ID: groupID, Name: "In-flight Cancel", Type: "subscription", URL: "http://test.invalid", Timeout: 30,
 	}); err != nil {
 		t.Fatal(err)
@@ -501,12 +501,12 @@ func TestCancelMarkerInterruptsInFlightUpdate(t *testing.T) {
 		<-request.Context().Done()
 	}))
 	defer server.Close()
-	metadata, err := catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	metadata.URL = server.URL
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 
@@ -561,7 +561,7 @@ func TestUpdateRejectsUnreadableProgressStateDirectory(t *testing.T) {
 		_, _ = writer.Write([]byte(`{"outbounds":[]}`))
 	}))
 	defer server.Close()
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), catalog.Metadata{
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), catalog.Metadata{
 		Schema: 1, ID: groupID, Name: groupID, Type: "subscription", URL: server.URL, Timeout: 5,
 	}); err != nil {
 		t.Fatal(err)
@@ -605,7 +605,7 @@ func TestUpdateReportsHistoryWriteFailureAfterPersistence(t *testing.T) {
 		_, _ = writer.Write([]byte(`{"outbounds":[{"type":"socks","tag":"persisted-node","server":"127.0.0.1","server_port":1080}]}`))
 	}))
 	defer server.Close()
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), catalog.Metadata{
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), catalog.Metadata{
 		Schema: 1, ID: groupID, Name: groupID, Type: "subscription", URL: server.URL, Timeout: 5,
 	}); err != nil {
 		t.Fatal(err)
@@ -631,7 +631,7 @@ func TestUpdateReportsHistoryWriteFailureAfterPersistence(t *testing.T) {
 	if !result.Persisted {
 		t.Fatalf("persisted result was lost: %+v", result)
 	}
-	metadata, err := catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +664,7 @@ func TestUpdateRecoversStaleSubscriptionStateBeforeStarting(t *testing.T) {
 		_, _ = writer.Write([]byte(`{"outbounds":[{"type":"socks","tag":"recovered-node","server":"127.0.0.1","server_port":1080}]}`))
 	}))
 	defer server.Close()
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), catalog.Metadata{
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), catalog.Metadata{
 		Schema: 1, ID: groupID, Name: groupID, Type: "subscription", URL: server.URL, Timeout: 5,
 	}); err != nil {
 		t.Fatal(err)
@@ -749,7 +749,7 @@ func TestUpdatePreservesPendingRuntimeErrorAcrossFailureAnd304(t *testing.T) {
 		RuntimeSyncPending: true, RuntimeSyncState: RuntimeSyncFailed,
 		LastError: previousRuntimeError, Timeout: 5,
 	}
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	oldProvider := []byte(`{"outbounds":[{"type":"socks","tag":"old-node","server":"127.0.0.1","server_port":1080}]}` + "\n")
@@ -765,7 +765,7 @@ func TestUpdatePreservesPendingRuntimeErrorAcrossFailureAnd304(t *testing.T) {
 	if !errors.As(err, &subscriptionErr) || subscriptionErr.Code != "subscription.convert_failed" {
 		t.Fatalf("network failure returned the wrong code: %v", err)
 	}
-	metadata, err = catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	metadata, err = catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,7 +784,7 @@ func TestUpdatePreservesPendingRuntimeErrorAcrossFailureAnd304(t *testing.T) {
 	if !result.NotModified || !result.Persisted || !result.RuntimeSyncPending {
 		t.Fatalf("304 incorrectly cleared pending state: %+v", result)
 	}
-	metadata, err = catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	metadata, err = catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -801,14 +801,14 @@ func TestUpdatePreservesPendingRuntimeErrorAcrossFailureAnd304(t *testing.T) {
 
 	metadata.LastError = "订阅更新已取消"
 	metadata.RuntimeSyncPending = true
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	thirdNow := secondNow.Add(15 * time.Minute)
 	if _, err := Update(context.Background(), UpdateOptions{Root: root, GroupID: groupID, Now: thirdNow}); err != nil {
 		t.Fatalf("304 did not recover stale cancellation metadata: %v", err)
 	}
-	metadata, err = catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	metadata, err = catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -832,7 +832,7 @@ func TestUpdateFailureReportsHistoryRecoveryErrorCode(t *testing.T) {
 		Schema: 1, ID: groupID, Name: groupID, Type: "subscription", URL: server.URL,
 		AutoUpdate: true, UpdateInterval: 900, LastSuccessAt: "2023-11-14T22:13:20Z", Timeout: 5,
 	}
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	oldProvider := []byte(`{"outbounds":[{"type":"socks","tag":"old-node","server":"127.0.0.1","server_port":1080}]}` + "\n")
@@ -855,7 +855,7 @@ func TestUpdateFailureReportsHistoryRecoveryErrorCode(t *testing.T) {
 	if !ok || data["original_code"] != "subscription.convert_failed" {
 		t.Fatalf("original failure code was not retained: %#v", subscriptionErr.Data)
 	}
-	metadata, err = catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	metadata, err = catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -879,7 +879,7 @@ func TestRuntimeSyncSuccessHistoryFailureRestoresPendingMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	previousError := RuntimeSyncFailureMessage + ": reload failed"
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), catalog.Metadata{
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), catalog.Metadata{
 		Schema: 1, ID: groupID, Name: groupID, Type: "subscription",
 		RuntimeSyncPending: true, RuntimeSyncState: RuntimeSyncFailed, LastError: previousError,
 	}); err != nil {
@@ -893,7 +893,7 @@ func TestRuntimeSyncSuccessHistoryFailureRestoresPendingMetadata(t *testing.T) {
 	if err == nil {
 		t.Fatal("runtime success unexpectedly ignored history failure")
 	}
-	metadata, loadErr := catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	metadata, loadErr := catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
@@ -973,4 +973,79 @@ func TestAcquireLockRecoversReusedPIDAndRejectsConcurrentHolder(t *testing.T) {
 		t.Fatalf("释放后无法再次获取订阅锁: %v", err)
 	}
 	releaseLock(lockPath, second)
+}
+
+func TestUpdateFailurePreservesProviderValidators(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == `"v2"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"v2"`)
+		w.Header().Set("Last-Modified", "Wed, 08 Oct 2025 00:00:00 GMT")
+		_, _ = w.Write([]byte("not a subscription"))
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	group := filepath.Join(root, "fixture")
+	if err := os.MkdirAll(group, 0700); err != nil {
+		t.Fatal(err)
+	}
+	metadata := catalog.NewMetadata("fixture", "Audit", "subscription", server.URL, time.Now())
+	metadata.ETag, metadata.Revision, metadata.NodeCount = `"v1"`, 1, 1
+	metadata.LastModified, metadata.LastSuccessAt = "Tue, 07 Oct 2025 00:00:00 GMT", "2025-10-07T00:00:00Z"
+	metadata.UpdateViaProxy = "never"
+	if err := catalog.SaveMetadataAtomic(t.Context(), filepath.Join(group, "meta.json"), metadata); err != nil {
+		t.Fatal(err)
+	}
+	old := []byte(`{"outbounds":[{"type":"socks","tag":"old-node","server":"127.0.0.1","server_port":1080}]}`)
+	if err := provider.WriteAtomic(filepath.Join(group, "provider.json"), old, 0600); err != nil {
+		t.Fatal(err)
+	}
+	options := UpdateOptions{Root: root, GroupID: "fixture", ProgressDir: filepath.Join(root, "progress"), Now: time.Now()}
+	_, firstErr := Update(t.Context(), options)
+	if firstErr == nil {
+		t.Fatal("expected conversion failure")
+	}
+	failed, err := catalog.LoadMetadata(context.Background(), filepath.Join(group, "meta.json"), "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, secondErr := Update(t.Context(), options)
+	after, err := catalog.LoadMetadata(context.Background(), filepath.Join(group, "meta.json"), "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("first error=%v; persisted ETag=%q; next result=%+v error=%v; last_error=%q revision=%d", firstErr, failed.ETag, result, secondErr, after.LastError, after.Revision)
+	if failed.ETag != metadata.ETag || failed.LastModified != metadata.LastModified {
+		t.Fatal("无效订阅替换了有效 Provider 的 HTTP 验证器")
+	}
+	if secondErr == nil || result.NotModified || after.LastError == "" || after.LastSuccessAt != metadata.LastSuccessAt {
+		t.Fatalf("再次请求误清除更新失败: result=%+v metadata=%+v err=%v", result, after, secondErr)
+	}
+	content, err := os.ReadFile(filepath.Join(group, "provider.json"))
+	if err != nil || string(content) != string(old) {
+		t.Fatalf("失败后旧 Provider 未保留: %v", err)
+	}
+}
+
+func TestUpdateAcceptedContentClearsAbsentValidators(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"outbounds":[{"type":"socks","tag":"node","server":"127.0.0.1","server_port":1080}]}`))
+	}))
+	defer server.Close()
+	root := t.TempDir()
+	groupDir := filepath.Join(root, "fixture")
+	metadata := catalog.NewMetadata("fixture", "Fixture", "subscription", server.URL, time.Now())
+	metadata.ETag, metadata.LastModified, metadata.UpdateViaProxy = `"old"`, "Tue, 07 Oct 2025 00:00:00 GMT", "never"
+	if err := catalog.SaveMetadataAtomic(t.Context(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Update(t.Context(), UpdateOptions{Root: root, GroupID: "fixture", ProgressDir: filepath.Join(root, "progress")}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := catalog.LoadMetadata(t.Context(), filepath.Join(groupDir, "meta.json"), "fixture")
+	if err != nil || after.ETag != "" || after.LastModified != "" {
+		t.Fatalf("新 Provider 沿用了过期验证器: %+v %v", after, err)
+	}
 }

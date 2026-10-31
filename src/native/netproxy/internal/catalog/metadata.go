@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -62,12 +63,12 @@ type Metadata struct {
 }
 
 // LoadMetadata 读取并补齐旧字段缺省值。
-func LoadMetadata(path, fallbackID string) (Metadata, error) {
+func LoadMetadata(ctx context.Context, path, fallbackID string) (Metadata, error) {
 	root, err := catalogRootForPath(path)
 	if err != nil {
 		return Metadata{}, err
 	}
-	release, err := acquireCatalogRootAndRecover(root)
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return Metadata{}, err
 	}
@@ -95,12 +96,12 @@ func LoadMetadataLocked(path, fallbackID string) (Metadata, error) {
 }
 
 // SaveMetadataAtomic 以 0600 权限原子保存 Catalog 元数据。
-func SaveMetadataAtomic(path string, metadata Metadata) error {
+func SaveMetadataAtomic(ctx context.Context, path string, metadata Metadata) error {
 	root, err := catalogRootForPath(path)
 	if err != nil {
 		return err
 	}
-	release, err := acquireCatalogRootAndRecover(root)
+	release, err := acquireCatalogRootAndRecover(ctx, root)
 	if err != nil {
 		return err
 	}

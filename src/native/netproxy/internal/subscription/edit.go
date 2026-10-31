@@ -54,6 +54,22 @@ type EditResult struct {
 // editBeforeRestoreHook 仅供同包测试在恢复窗口内模拟其他进程写入。
 var editBeforeRestoreHook = func() {}
 
+// ValidateSettings 统一订阅创建、编辑和下载前的设置校验。
+func ValidateSettings(interval int64, viaProxy string, timeout int64) error {
+	if interval < int64(minimumInterval/time.Second) {
+		return &Error{Code: "subscription.interval_too_short", Message: "更新周期不能少于 15 分钟"}
+	}
+	switch viaProxy {
+	case "auto", "always", "never":
+	default:
+		return &Error{Code: "subscription.proxy_mode_invalid", Message: "订阅更新代理模式无效"}
+	}
+	if timeout <= 0 {
+		return &Error{Code: "subscription.timeout_invalid", Message: "下载超时必须大于 0"}
+	}
+	return nil
+}
+
 // Edit 更新订阅设置，并在影响节点内容的设置变化时重新验证订阅。
 func Edit(ctx context.Context, options EditOptions) (EditResult, error) {
 	if strings.TrimSpace(options.Root) == "" || !validGroupID(options.GroupID) {
@@ -62,11 +78,11 @@ func Edit(ctx context.Context, options EditOptions) (EditResult, error) {
 	if options.Now.IsZero() {
 		options.Now = time.Now()
 	}
-	releaseGroup, err := catalog.Acquire(options.Root, options.GroupID)
+	releaseGroup, err := catalog.Acquire(ctx, options.Root, options.GroupID)
 	if err != nil {
 		return EditResult{}, &Error{Code: "subscription.busy", Message: "订阅或 Catalog 正在被其他进程使用", Data: err.Error()}
 	}
-	releaseRoot, err := catalog.AcquireRoot(options.Root)
+	releaseRoot, err := catalog.AcquireRoot(ctx, options.Root)
 	if err != nil {
 		releaseGroup()
 		return EditResult{}, &Error{Code: "subscription.busy", Message: "订阅或 Catalog 正在被其他进程使用", Data: err.Error()}
@@ -150,18 +166,10 @@ func Edit(ctx context.Context, options EditOptions) (EditResult, error) {
 		metadata.AutoUpdate = *options.AutoUpdate
 	}
 	if options.UpdateInterval != nil {
-		if *options.UpdateInterval < int64(minimumInterval/time.Second) {
-			return EditResult{}, &Error{Code: "subscription.interval_too_short", Message: "更新周期不能少于 15 分钟"}
-		}
 		metadata.UpdateInterval = *options.UpdateInterval
 		metadata.IntervalSource = "user"
 	}
 	if options.UpdateViaProxy != nil {
-		switch *options.UpdateViaProxy {
-		case "auto", "always", "never":
-		default:
-			return EditResult{}, &Error{Code: "subscription.proxy_mode_invalid", Message: "订阅更新代理模式无效"}
-		}
 		if metadata.UpdateViaProxy != *options.UpdateViaProxy {
 			metadata.UpdateViaProxy = *options.UpdateViaProxy
 			requiresUpdate = true
@@ -198,13 +206,13 @@ func Edit(ctx context.Context, options EditOptions) (EditResult, error) {
 		}
 	}
 	if options.Timeout != nil {
-		if *options.Timeout <= 0 {
-			return EditResult{}, &Error{Code: "subscription.timeout_invalid", Message: "下载超时必须大于 0"}
-		}
 		if metadata.Timeout != *options.Timeout {
 			metadata.Timeout = *options.Timeout
 			requiresUpdate = true
 		}
+	}
+	if err := ValidateSettings(metadata.UpdateInterval, metadata.UpdateViaProxy, metadata.Timeout); err != nil {
+		return EditResult{}, err
 	}
 	if options.AutoUpdate != nil || options.UpdateInterval != nil {
 		if metadata.AutoUpdate {
@@ -239,7 +247,7 @@ func Edit(ctx context.Context, options EditOptions) (EditResult, error) {
 			return mergeEditResult(EditResult{GroupID: options.GroupID, NameChanged: nameChanged, RequiresUpdate: requiresUpdate}, updated), err
 		}
 		editBeforeRestoreHook()
-		restoreErr := restoreMetadataIfUnchanged(options.Root, options.GroupID, metaPath, oldMetadata, metadata)
+		restoreErr := restoreMetadataIfUnchanged(ctx, options.Root, options.GroupID, metaPath, oldMetadata, metadata)
 		return EditResult{}, errors.Join(err, restoreErr)
 	}
 	return mergeEditResult(EditResult{GroupID: options.GroupID, NameChanged: nameChanged, RequiresUpdate: true}, updated), nil
@@ -257,13 +265,15 @@ func mergeEditResult(edit EditResult, update Result) EditResult {
 	return edit
 }
 
-func restoreMetadataIfUnchanged(root, groupID, metaPath string, oldMetadata, expected catalog.Metadata) error {
-	releaseGroup, err := catalog.Acquire(root, groupID)
+func restoreMetadataIfUnchanged(ctx context.Context, root, groupID, metaPath string, oldMetadata, expected catalog.Metadata) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	releaseGroup, err := catalog.Acquire(ctx, root, groupID)
 	if err != nil {
 		return err
 	}
 	defer releaseGroup()
-	releaseRoot, err := catalog.AcquireRoot(root)
+	releaseRoot, err := catalog.AcquireRoot(ctx, root)
 	if err != nil {
 		return err
 	}

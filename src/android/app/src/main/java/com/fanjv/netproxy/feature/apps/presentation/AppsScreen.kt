@@ -1,10 +1,10 @@
 package com.fanjv.netproxy.feature.apps.presentation
 
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.tween
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Android
@@ -32,19 +33,23 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.CancellationException
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.stringResource
@@ -52,17 +57,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.flowWithLifecycle
 import com.fanjv.netproxy.R
 import com.fanjv.netproxy.core.di.netProxyViewModel
 import com.fanjv.netproxy.core.ui.component.BackIconButton
 import com.fanjv.netproxy.core.ui.component.BlurredBar
-import com.fanjv.netproxy.core.ui.component.EmptyCatalog
 import com.fanjv.netproxy.core.ui.component.SearchBarFake
 import com.fanjv.netproxy.core.ui.component.SearchBox
 import com.fanjv.netproxy.core.ui.component.SearchPager
 import com.fanjv.netproxy.core.ui.component.SearchStatus
 import com.fanjv.netproxy.core.ui.component.StatusTag
 import com.fanjv.netproxy.core.ui.component.rememberBlurBackdrop
+import com.fanjv.netproxy.core.ui.component.rememberCommitOnLeave
 import com.fanjv.netproxy.feature.apps.data.AppIconCache
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
@@ -77,6 +85,7 @@ import top.yukonga.miuix.kmp.basic.PopupPositionProvider
 import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
 import top.yukonga.miuix.kmp.blur.layerBackdrop
@@ -85,24 +94,23 @@ import top.yukonga.miuix.kmp.icon.extended.MoreCircle
 import top.yukonga.miuix.kmp.overlay.OverlayListPopup
 import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
+import top.yukonga.miuix.kmp.utils.MiuixPopupUtils.Companion.MiuixPopupHost
 import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
 
 @Composable
 fun AppIcon(
-    packageName: String,
-    userId: String,
+    app: AppInfoModel,
     modifier: Modifier = Modifier,
 ) {
-    val context = LocalContext.current
-    val iconSizePx = with(LocalDensity.current) { 40.dp.roundToPx() }
-    var icon by remember(packageName, userId, iconSizePx) {
-        mutableStateOf<ImageBitmap?>(null)
+    val iconRevision = AppIconCache.revision
+    var icon by remember(app.id) {
+        mutableStateOf(AppIconCache.cachedIcon(app.iconKey))
     }
 
-    LaunchedEffect(packageName, userId, iconSizePx) {
-        icon = AppIconCache.loadIcon(context, packageName, userId, iconSizePx)
+    LaunchedEffect(app.iconKey, iconRevision) {
+        AppIconCache.cachedIcon(app.iconKey)?.let { icon = it }
     }
 
     Box(
@@ -138,10 +146,35 @@ internal fun AppsScreen(
 ) {
     val apps by viewModel.state.collectAsStateWithLifecycle()
     val spacing = 10.dp
+    val showAppControls = apps.hasLoadedApps && apps.appProxyEnabled
 
-    val searchStatus by viewModel.searchStatus
+    val searchStatus = rememberSaveable(saver = SearchStatus.Saver) { SearchStatus("") }
+    val listState = rememberLazyListState()
+    val searchListState = rememberLazyListState()
 
-    LaunchedEffect(Unit) { viewModel.load() }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    for (currentList in listOf(listState, searchListState)) {
+        LaunchedEffect(currentList, apps.masterAppList, lifecycle) {
+            snapshotFlow {
+                val active = (currentList === listState) == searchStatus.isCollapsed()
+                (if (active) currentList.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String } else emptyList()) to AppIconCache.generation
+            }.flowWithLifecycle(lifecycle, Lifecycle.State.RESUMED)
+                .distinctUntilChanged().collectLatest { (visible, _) ->
+                    try { viewModel.loadIcons(visible) }
+                    catch (error: CancellationException) { throw error }
+                    catch (_: Exception) { }
+                }
+        }
+    }
+
+    val resources = LocalConfiguration.current
+    LaunchedEffect(resources.locales.toLanguageTags()) {
+        viewModel.load(force = apps.hasLoadedApps)
+    }
+    val commitOnLeave = rememberCommitOnLeave(viewModel::requestPolicyFlush)
+    val leave: () -> Unit = { commitOnLeave { onBack?.invoke() } }
+    BackHandler(enabled = onBack != null && searchStatus.isCollapsed() &&
+        (apps.hasPendingPolicy || apps.requiresPolicyReload)) { leave() }
 
     val scrollBehavior = MiuixScrollBehavior()
     val dynamicTopPadding =
@@ -162,104 +195,149 @@ internal fun AppsScreen(
                     searchStatus.TopAppBarAnim(backgroundColor = barColor) {
                         TopAppBar(
                             color = barColor,
-                            title = stringResource(R.string.apps),
+                            title = stringResource(R.string.proxy_apps),
                             scrollBehavior = scrollBehavior,
                             navigationIcon = {
-                                onBack?.let { BackIconButton(onClick = it) }
+                                onBack?.let { BackIconButton(onClick = leave) }
                             },
                             actions = {
-                                val showTopPopup = remember { mutableStateOf(false) }
-                                OverlayListPopup(
-                                    show = showTopPopup.value,
-                                    popupPositionProvider = ListPopupDefaults.ContextMenuPositionProvider,
-                                    alignment = PopupPositionProvider.Align.TopEnd,
-                                    onDismissRequest = {
-                                        showTopPopup.value = false
+                                if (showAppControls) {
+                                    val showTopPopup = remember { mutableStateOf(false) }
+                                    OverlayListPopup(
+                                        show = showTopPopup.value,
+                                        popupPositionProvider = ListPopupDefaults.ContextMenuPositionProvider,
+                                        alignment = PopupPositionProvider.Align.TopEnd,
+                                        onDismissRequest = {
+                                            showTopPopup.value = false
+                                        }
+                                    ) {
+                                        ListPopupColumn {
+                                            DropdownImpl(
+                                                text = stringResource(R.string.show_system_apps),
+                                                isSelected = apps.showSystemApps,
+                                                onSelectedIndexChange = {
+                                                    viewModel.setShowSystemApps(!apps.showSystemApps)
+                                                    showTopPopup.value = false
+                                                },
+                                                optionSize = 4,
+                                                index = 0
+                                            )
+                                            DropdownImpl(
+                                                text = stringResource(R.string.app_selected_first),
+                                                isSelected = apps.appSelectedFirst,
+                                                onSelectedIndexChange = {
+                                                    viewModel.setSelectedFirst(!apps.appSelectedFirst)
+                                                    showTopPopup.value = false
+                                                },
+                                                optionSize = 4,
+                                                index = 1
+                                            )
+                                            DropdownImpl(
+                                                text = stringResource(R.string.app_reverse_sort),
+                                                isSelected = apps.appReverseSort,
+                                                onSelectedIndexChange = {
+                                                    viewModel.setReverseSort(!apps.appReverseSort)
+                                                    showTopPopup.value = false
+                                                },
+                                                optionSize = 4,
+                                                index = 2
+                                            )
+                                            DropdownImpl(
+                                                text = stringResource(R.string.app_show_package_name),
+                                                isSelected = apps.appShowPackageName,
+                                                onSelectedIndexChange = {
+                                                    viewModel.setShowPackageName(!apps.appShowPackageName)
+                                                    showTopPopup.value = false
+                                                },
+                                                optionSize = 4,
+                                                index = 3
+                                            )
+                                        }
                                     }
-                                ) {
-                                    ListPopupColumn {
-                                        DropdownImpl(
-                                            text = stringResource(R.string.show_system_apps),
-                                            isSelected = apps.showSystemApps,
-                                            onSelectedIndexChange = {
-                                                viewModel.setShowSystemApps(!apps.showSystemApps)
-                                                showTopPopup.value = false
-                                            },
-                                            optionSize = 4,
-                                            index = 0
-                                        )
-                                        DropdownImpl(
-                                            text = stringResource(R.string.app_selected_first),
-                                            isSelected = apps.appSelectedFirst,
-                                            onSelectedIndexChange = {
-                                                viewModel.setSelectedFirst(!apps.appSelectedFirst)
-                                                showTopPopup.value = false
-                                            },
-                                            optionSize = 4,
-                                            index = 1
-                                        )
-                                        DropdownImpl(
-                                            text = stringResource(R.string.app_reverse_sort),
-                                            isSelected = apps.appReverseSort,
-                                            onSelectedIndexChange = {
-                                                viewModel.setReverseSort(!apps.appReverseSort)
-                                                showTopPopup.value = false
-                                            },
-                                            optionSize = 4,
-                                            index = 2
-                                        )
-                                        DropdownImpl(
-                                            text = stringResource(R.string.app_show_package_name),
-                                            isSelected = apps.appShowPackageName,
-                                            onSelectedIndexChange = {
-                                                viewModel.setShowPackageName(!apps.appShowPackageName)
-                                                showTopPopup.value = false
-                                            },
-                                            optionSize = 4,
-                                            index = 3
+                                    IconButton(
+                                        onClick = { showTopPopup.value = true },
+                                        holdDownState = showTopPopup.value
+                                    ) {
+                                        Icon(
+                                            imageVector = MiuixIcons.MoreCircle,
+                                            contentDescription = null,
+                                            tint = colorScheme.onSurface
                                         )
                                     }
-                                }
-                                IconButton(
-                                    onClick = { showTopPopup.value = true },
-                                    holdDownState = showTopPopup.value
-                                ) {
-                                    Icon(
-                                        imageVector = MiuixIcons.MoreCircle,
-                                        contentDescription = null,
-                                        tint = colorScheme.onSurface
-                                    )
                                 }
                             },
                             bottomContent = {
-                                Box(
-                                    modifier = Modifier
-                                        .alpha(if (searchStatus.isCollapsed()) 1f else 0f)
-                                        .onGloballyPositioned { coordinates ->
-                                            with(density) {
-                                                searchStatus.offsetY =
-                                                    coordinates.positionInWindow().y.toDp()
-                                            }
-                                        }
-                                        .then(
-                                            if (searchStatus.isCollapsed()) {
-                                                Modifier.pointerInput(Unit) {
-                                                    detectTapGestures {
-                                                        searchStatus.current =
-                                                            SearchStatus.Status.EXPANDING
+                                Column {
+                                    if (apps.hasLoadedApps) {
+                                        Box(
+                                            modifier = Modifier
+                                                .alpha(if (searchStatus.isCollapsed()) 1f else 0f)
+                                                .onGloballyPositioned { coordinates ->
+                                                    with(density) {
+                                                        searchStatus.offsetY =
+                                                            coordinates.positionInWindow().y.toDp()
                                                     }
                                                 }
-                                            } else {
-                                                Modifier
-                                            }
-                                        )
-                                ) {
-                                    SearchBarFake(searchStatus.label, dynamicTopPadding)
+                                                .then(
+                                                    if (searchStatus.isCollapsed()) {
+                                                        Modifier.pointerInput(Unit) {
+                                                            detectTapGestures {
+                                                                searchStatus.current =
+                                                                    SearchStatus.Status.EXPANDING
+                                                            }
+                                                        }
+                                                    } else {
+                                                        Modifier
+                                                    }
+                                                )
+                                        ) {
+                                            SearchBarFake(searchStatus.label, dynamicTopPadding)
+                                        }
+                                    }
+                                    if (apps.hasLoadedApps) {
+                                        AppProxyMode(apps, viewModel::setProxySettings)
+                                    }
                                 }
                             }
                         )
                     }
                 }
+            },
+            popupHost = {
+                if (apps.hasLoadedApps) {
+                    val searchResults = remember(
+                        apps.searchResults, apps.proxiedApps, apps.appSelectedFirst, apps.appReverseSort
+                    ) { apps.orderedApps(apps.searchResults) }
+                    searchStatus.SearchPager(
+                        empty = apps.appProxyEnabled && !apps.isFilteringApps &&
+                            apps.appSearchQuery.isNotBlank() && apps.searchResults.isEmpty(),
+                        listState = searchListState,
+                        searchBarTopPadding = dynamicTopPadding,
+                    ) {
+                        if (apps.error.isNotBlank() || apps.requiresPolicyReload) item("error") {
+                            if (apps.error.isNotBlank()) Text(apps.error, Modifier.padding(14.dp), color = colorScheme.error)
+                            if (apps.requiresPolicyReload) TextButton(stringResource(R.string.routing_reload_draft),
+                                onClick = viewModel::discardPolicyAndReload)
+                        }
+                        items(
+                            items = if (apps.appProxyEnabled) searchResults else emptyList(),
+                            key = AppInfoModel::id,
+                            contentType = { "app_item" },
+                        ) { app ->
+                            AppItem(app, apps.appShowPackageName, app.id in apps.proxiedApps, spacing) {
+                                if (apps.appSelectedFirst) {
+                                    // 重排时保持视口位置，不跟随已选条目的 key 上移。
+                                    searchListState.requestScrollToItem(
+                                        searchListState.firstVisibleItemIndex,
+                                        searchListState.firstVisibleItemScrollOffset
+                                    )
+                                }
+                                viewModel.toggle(app.id)
+                            }
+                        }
+                    }
+                }
+                MiuixPopupHost()
             },
             contentWindowInsets = WindowInsets.systemBars.add(WindowInsets.displayCutout)
                 .only(WindowInsetsSides.Horizontal)
@@ -290,7 +368,9 @@ internal fun AppsScreen(
                         stringResource(R.string.refresh_refresh),
                         stringResource(R.string.refresh_complete),
                     )
-                    val allApps = apps.allApps
+                    val allApps = remember(
+                        apps.allApps, apps.proxiedApps, apps.appSelectedFirst, apps.appReverseSort
+                    ) { apps.orderedApps() }
 
                     PullToRefresh(
                         isRefreshing = apps.isLoadingApps,
@@ -305,6 +385,7 @@ internal fun AppsScreen(
                     ) {
                         Box(modifier = if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier) {
                             LazyColumn(
+                                state = listState,
                                 modifier = Modifier
                                     .fillMaxHeight()
                                     .scrollEndHaptic()
@@ -317,43 +398,13 @@ internal fun AppsScreen(
                                 ),
                                 overscrollEffect = null,
                             ) {
-                                item {
-                                    Card(
-                                        modifier = Modifier
-                                            .padding(horizontal = 12.dp)
-                                            .padding(bottom = spacing)
-                                            .fillMaxWidth(),
-                                    ) {
-                                        val modes = listOf(
-                                            stringResource(R.string.proxy_mode_off),
-                                            stringResource(R.string.app_proxy_mode_blacklist),
-                                            stringResource(R.string.app_proxy_mode_whitelist)
-                                        )
-                                        val selectedIndex = if (!apps.appProxyEnabled) 0
-                                        else if (apps.appProxyMode == "blacklist") 1
-                                        else 2
-
-                                        OverlayDropdownPreference(
-                                            title = stringResource(R.string.proxy_apps),
-                                            summary = stringResource(R.string.proxy_mode_summary),
-                                            items = modes,
-                                            selectedIndex = selectedIndex,
-                                            onSelectedIndexChange = { index ->
-                                                if (index == 0) {
-                                                    viewModel.setProxySettings(enabled = false)
-                                                } else {
-                                                    val mode =
-                                                        if (index == 1) "blacklist" else "whitelist"
-                                                    viewModel.setProxySettings(
-                                                        enabled = true,
-                                                        mode = mode
-                                                    )
-                                                }
-                                            }
-                                        )
-                                    }
+                                if (apps.error.isNotBlank()) item("error") {
+                                    Text(apps.error, Modifier.padding(14.dp), color = colorScheme.error)
                                 }
-
+                                if (apps.requiresPolicyReload) item("reload") {
+                                    TextButton(stringResource(R.string.routing_reload_draft),
+                                        onClick = viewModel::discardPolicyAndReload)
+                                }
                                 if (apps.appProxyEnabled) {
                                     items(
                                         items = allApps,
@@ -363,24 +414,9 @@ internal fun AppsScreen(
                                         AppItem(
                                             app,
                                             apps.appShowPackageName,
-                                            app.isProxied,
+                                            app.id in apps.proxiedApps,
                                             spacing,
-                                            viewModel
-                                        )
-                                    }
-                                } else {
-                                    item("app_proxy_disabled") {
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .height(300.dp),
-                                            contentAlignment = androidx.compose.ui.Alignment.Center,
-                                        ) {
-                                            EmptyCatalog(
-                                                text = stringResource(R.string.app_proxy_disabled_hint),
-                                                onRefresh = null,
-                                            )
-                                        }
+                                        ) { viewModel.toggle(app.id) }
                                     }
                                 }
 
@@ -393,21 +429,28 @@ internal fun AppsScreen(
                 }
             }
         }
+    }
+}
 
-        if (apps.appProxyEnabled) {
-            searchStatus.SearchPager(
-                defaultResult = { },
-                searchBarTopPadding = dynamicTopPadding,
-            ) {
-                items(
-                    items = apps.searchResults,
-                    key = AppInfoModel::id,
-                    contentType = { "app_item" },
-                ) { app ->
-                    AppItem(app, apps.appShowPackageName, app.isProxied, spacing, viewModel)
-                }
+@Composable
+private fun AppProxyMode(apps: AppsUiState, onChange: (Boolean, String?) -> Unit) {
+    Card(Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp).fillMaxWidth()) {
+        OverlayDropdownPreference(
+            title = stringResource(R.string.app_proxy_mode),
+            items = listOf(
+                stringResource(R.string.proxy_mode_off),
+                stringResource(R.string.app_proxy_mode_blacklist),
+                stringResource(R.string.app_proxy_mode_whitelist)
+            ),
+            selectedIndex = if (!apps.appProxyEnabled) 0 else if (apps.appProxyMode == "blacklist") 1 else 2,
+            onSelectedIndexChange = { index ->
+                onChange(index != 0, when (index) {
+                    1 -> "blacklist"
+                    2 -> "whitelist"
+                    else -> null
+                })
             }
-        }
+        )
     }
 }
 
@@ -418,32 +461,16 @@ private fun AppItem(
     showPackageName: Boolean,
     isProxied: Boolean,
     spacing: androidx.compose.ui.unit.Dp,
-    viewModel: AppsViewModel
+    onClick: () -> Unit
 ) {
-    val animationState = remember { Animatable(0f) }
-
-    LaunchedEffect(Unit) {
-        animationState.animateTo(
-            targetValue = 1f,
-            animationSpec = tween(durationMillis = 300)
-        )
-    }
-
     Card(
         modifier = Modifier
             .padding(horizontal = 12.dp)
             .padding(bottom = spacing)
             .fillMaxWidth()
-            .graphicsLayer {
-                val progress = animationState.value
-                this.alpha = progress
-                this.translationY = 50f * (1f - progress)
-            }
     ) {
         BasicComponent(
-            onClick = {
-                viewModel.toggle(app.id)
-            },
+            onClick = onClick,
             startAction = {
                 Box(
                     modifier = Modifier
@@ -451,8 +478,7 @@ private fun AppItem(
                         .padding(start = 12.dp)
                 ) {
                     AppIcon(
-                        packageName = app.packageName,
-                        userId = app.userId,
+                        app = app,
                         modifier = Modifier.padding(end = 12.dp)
                     )
                 }
@@ -472,9 +498,7 @@ private fun AppItem(
                 top.yukonga.miuix.kmp.basic.Checkbox(
                     modifier = Modifier.padding(end = 12.dp),
                     state = androidx.compose.ui.state.ToggleableState(isProxied),
-                    onClick = {
-                        viewModel.toggle(app.id)
-                    }
+                    onClick = onClick
                 )
             }
         ) {

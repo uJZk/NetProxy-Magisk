@@ -2,33 +2,32 @@ package main
 
 import (
 	"context"
-	"errors"
+	"os"
+
+	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
 )
 
-func (c *cli) service(ctx context.Context, args []string) int {
-	action := "status"
+func (c *cli) service(ctx context.Context, args []string) error {
+	operation := "status"
 	if len(args) > 0 {
-		action = args[0]
+		operation = args[0]
 	}
-	switch action {
+	switch operation {
 	case "status", "start", "stop", "restart", "reload", "check", "toggle":
-		return c.runCommand(ctx, runModuleService, c.moduleArgs("service", action)...)
 	default:
-		return c.fail("usage.invalid", "用法: netproxyctl service status|start|stop|restart|reload|check|toggle", 2)
+		return usageError("用法: netproxyctl service status|start|stop|restart|reload|check|toggle")
 	}
-}
-
-type commandHandler func(context.Context, []string) error
-
-func (c *cli) runCommand(ctx context.Context, handler commandHandler, args ...string) int {
-	if err := handler(ctx, args); err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return c.fail("command.timeout", "命令执行超时", 124)
-		}
-		if structured, ok := errors.AsType[*resultError](err); ok {
-			return c.failData(structured.Code, structured.Message, structured.Data, 1)
-		}
-		return c.fail("command.failed", err.Error(), 1)
+	data, err := moduleapp.ManageService(ctx, c.options, operation)
+	if err != nil {
+		return err
 	}
-	return 0
+	message := "服务操作完成"
+	responseData := any(data)
+	if operation == "status" {
+		message = "服务状态"
+		// service.status 是 Android 与 WebUI 的既有公开契约，状态字段必须直接位于 data。
+		responseData = data.Status
+	}
+	writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "service." + operation, Message: message, Data: responseData})
+	return nil
 }

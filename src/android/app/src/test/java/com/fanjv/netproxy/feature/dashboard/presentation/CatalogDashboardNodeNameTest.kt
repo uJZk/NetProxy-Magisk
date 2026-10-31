@@ -29,11 +29,12 @@ class CatalogDashboardNodeNameTest {
     }
 
     @Test
-    fun `service transition invalidates in-flight dashboard snapshots`() {
+    fun `refresh mode and service operations invalidate in-flight dashboard snapshots`() {
         assertEquals(false, shouldApplyDashboardSnapshot(1, 2, ""))
         assertEquals(false, shouldApplyDashboardSnapshot(2, 2, "stop"))
         assertEquals(false, shouldApplyDashboardSnapshot(2, 2, "start"))
-        assertEquals(true, shouldApplyDashboardSnapshot(2, 2, "mode"))
+        assertEquals(false, shouldApplyDashboardSnapshot(2, 2, "mode"))
+        assertEquals(true, shouldApplyDashboardSnapshot(2, 2, ""))
     }
 
     @Test
@@ -47,11 +48,21 @@ class CatalogDashboardNodeNameTest {
     }
 
     @Test
-    fun `automatic mode hides internal runtime node`() {
+    fun `automatic mode shows selected node without runtime group prefix`() {
         val status = status(
             selectorMode = "urltest",
-            runtimeSelected = "香港 01"
+            runtimeSelected = "group-id/香港 01"
         )
+
+        assertEquals("香港 01 · Auto-Fastest", dashboardNodeName(status))
+    }
+
+    @Test
+    fun `automatic mode hides stale selection when service is stopped`() {
+        val status = status(
+            selectorMode = "urltest",
+            runtimeSelected = "group-id/香港 01"
+        ).copy(state = "stopped")
 
         assertEquals("测试订阅/Auto-Fastest", dashboardNodeName(status))
     }
@@ -76,6 +87,7 @@ class CatalogDashboardNodeNameTest {
         selectorMode = selectorMode,
         activeGroupId = "group-id",
         activeGroupName = "测试订阅",
+        activeGroupRuntimeTag = "group-id",
         activeGroupNodeCount = 2,
         selectedNodeRef = selectedNodeRef,
         runtimeSelected = runtimeSelected

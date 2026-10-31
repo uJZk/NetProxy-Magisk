@@ -1,6 +1,7 @@
 package processlock
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -8,6 +9,39 @@ import (
 	"testing"
 	"time"
 )
+
+func TestAcquireCancellationKeepsExistingLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock")
+	holder, err := TryAcquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Release()
+	ctx, cancel := context.WithTimeout(t.Context(), 40*time.Millisecond)
+	defer cancel()
+	if lock, err := Acquire(ctx, path); !errors.Is(err, context.DeadlineExceeded) {
+		if lock != nil {
+			lock.Release()
+		}
+		t.Fatalf("等待锁未响应超时: %v", err)
+	}
+	if lock, err := TryAcquire(path); !errors.Is(err, ErrBusy) {
+		if lock != nil {
+			lock.Release()
+		}
+		t.Fatalf("取消释放了其他持有者的锁: %v", err)
+	}
+	if err := holder.Release(); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := Acquire(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestProcessLockHelper(t *testing.T) {
 	if os.Getenv("NETPROXY_PROCESS_LOCK_HELPER") != "1" {

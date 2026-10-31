@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -208,8 +207,8 @@ func TestScheduling(t *testing.T) {
 	}
 }
 
-// 没有入站的配置能通过 sing-box check 却什么都不代理，必须在这里拦下。
-func TestUpdateRejectsConfigWithoutInbound(t *testing.T) {
+// 配置能否运行由 sing-box 决定，不对用户配置增加入站要求。
+func TestUpdateAcceptsConfigWithoutInbound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		_, _ = writer.Write([]byte(`{"outbounds":[{"type":"direct","tag":"direct"}]}`))
 	}))
@@ -217,14 +216,8 @@ func TestUpdateRejectsConfigWithoutInbound(t *testing.T) {
 
 	options := newOptions(t, server.URL)
 	_, err := rawconfig.Update(context.Background(), options)
-	if err == nil {
-		t.Fatal("a configuration without inbounds must be rejected")
-	}
-	if !strings.Contains(err.Error(), "inbound") {
-		t.Fatalf("unhelpful error: %v", err)
-	}
-	if _, statErr := os.Stat(options.ConfigPath); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatal("the rejected configuration must not be installed")
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -279,5 +272,23 @@ func TestUpdateRefetchesAfterURLChange(t *testing.T) {
 	}
 	if string(content) != replacement {
 		t.Fatalf("configuration was not replaced after the URL changed: %s", content)
+	}
+}
+
+func TestUpdateRestoresConfigIfMetadataCannotBeSaved(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(sampleConfig)) }))
+	defer server.Close()
+	options := newOptions(t, server.URL)
+	previous := []byte(`{"outbounds":[{"type":"direct","tag":"old"}]}`)
+	if err := os.WriteFile(options.ConfigPath, previous, 0600); err != nil {
+		t.Fatal(err)
+	}
+	options.Validate = func(context.Context, string) error { return os.Mkdir(options.MetaPath, 0700) }
+	if _, err := rawconfig.Update(context.Background(), options); err == nil {
+		t.Fatal("expected metadata failure")
+	}
+	got, err := os.ReadFile(options.ConfigPath)
+	if err != nil || string(got) != string(previous) {
+		t.Fatalf("previous config lost: %s %v", got, err)
 	}
 }

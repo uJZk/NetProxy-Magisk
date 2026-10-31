@@ -4,11 +4,10 @@
 
 ## 获取应用
 
-- 推荐通过 [Google Play](https://play.google.com/store/apps/details?id=com.fanjv.netproxy) 安装和更新。
-- NetProxy 完整模块包内置带广告的管理器 APK，供无法使用 Google Play 的设备安装。
-- Lite 模块包不包含管理器 APK。
+- 从 [Releases](https://github.com/Fanju6/NetProxy-Magisk/releases) 下载模块包获取管理器。
+- 每个 Release 与 CI 模块包都包含管理器 APK；刷入时可选择安装或更新，也可跳过。
 
-模块内置 APK 是独立维护的发行产物，不由仓库 CI 自动编译，也不会在本地构建后自动覆盖 `src/module/NetProxy.apk`。
+模块包中的 APK 由仓库 CI 从当前源码构建，使用固定密钥签名，APK 和签名材料不提交到仓库。后续使用同一密钥的构建可以直接覆盖升级。管理器不检查安装来源或签名证书，也不显示来源警告；CI 版本名仍带提交短哈希，便于定位构建。
 
 ## 功能
 
@@ -23,7 +22,7 @@
 
 ## 运行要求
 
-- Android 12 或更高版本
+- Android 8.0（API 26）或更高版本
 - `arm64-v8a` 设备
 - Magisk、KernelSU 或 APatch Root 环境
 - 已安装兼容版本的 NetProxy 模块
@@ -47,7 +46,7 @@ src/android/
 app/src/main/java/com/fanjv/netproxy/
 ├── core/                 # 命令契约、依赖容器、模块路径和共享 UI
 ├── feature/              # dashboard、nodes、subscriptions 等功能域
-├── navigation/           # Navigation3 路由与主导航状态
+├── navigation/           # Miuix Nav 路由与主导航状态
 ├── MainActivity.kt       # Android 与 Compose 入口
 └── NetProxyApplication.kt
 ```
@@ -62,7 +61,7 @@ Compose UI -> ViewModel -> Repository -> NetProxyCtlClient -> netproxyctl
 
 ## 本地构建
 
-准备 Android SDK 37 和 JDK 21，然后从仓库根目录执行：
+准备 Android SDK 37 和 JDK 25，然后从仓库根目录执行：
 
 ```bash
 cd src/android
@@ -76,7 +75,7 @@ cd src/android
 .\gradlew.bat testDebugUnitTest lintDebug assembleDebug
 ```
 
-调试 APK 位于 `app/build/outputs/apk/debug/`。发布版本需要在本地提供签名材料，签名文件和密钥配置不得提交到仓库。
+调试 APK 位于 `app/build/outputs/apk/debug/`。本地 Release APK 未签名；模块包中的管理器由 CI 使用 GitHub Secrets 中的固定密钥签名。密钥库以 Base64 放入 `ANDROID_KEYSTORE_BASE64`，密码和别名分别放入 `ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_PASSWORD`、`ANDROID_KEY_ALIAS`，不得写入源码或本地构建配置后提交。
 
 ## 第三方源码
 

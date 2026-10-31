@@ -1,92 +1,100 @@
-# ebpf.conf
+# eBPF 原生参数
 
-eBPF 透明代理配置位于：
+eBPF 参数保存在 `config/inbound/inbound.json` 的 `ebpf` 对象。完整结构、共用应用策略与保存方法见 [入站配置](/config/inbound)。通过 `inbound/ebpf` 编辑时，候选文件必须保留 `{"ebpf": {...}}` 包装。
 
-```text
-/data/adb/modules/netproxy/config/ebpf/ebpf.conf
+## 默认参数
+
+```json
+{
+  "ebpf": {
+    "type": "ebpf",
+    "tag": "netproxy-in",
+    "network": ["tcp", "udp"],
+    "udp_timeout": "5m",
+    "tc_priority": 1,
+    "local": {
+      "enabled": true,
+      "data_plane": "socket_assign",
+      "dns_mode": "respect_policy",
+      "ipv6": true,
+      "bypass_private_address": true,
+      "bypass_rule_set": ["geoip/cn"]
+    },
+    "shared": {
+      "enabled": false,
+      "data_plane": "socket_assign",
+      "default_interface": false,
+      "dns_mode": "hijack",
+      "interface": ["wlan2"],
+      "ipv6": true,
+      "bypass_private_address": true,
+      "bypass_rule_set": ["geoip/cn"]
+    }
+  }
+}
 ```
 
-服务启动或 reload 时，Native 读取该文件并生成 `runtime/ebpf.json`。运行时文件是生成物，不应直接编辑。所有新 eBPF 字段都可以在 `ebpf.conf` 中手动设置，Android 管理器只展示常用选项。
+`type` 固定为 `ebpf`，`tag` 固定为 `netproxy-in`。`network` 可以只选择 `tcp` 或 `udp`；默认两者均接管。`tc_priority` 用于协调同一接口上的 TC filter，通常保持默认值。
 
 ## 数据路径
 
-```ini
-EBPF_MODE="local"
-EBPF_NETWORK=""
-EBPF_UDP_TIMEOUT="5m"
-EBPF_TC_PRIORITY=1
-EBPF_BYPASS_RULE_SET="direct,cn-ip"
-```
+`local.enabled` 与 `shared.enabled` 独立控制本机和共享网络，选择 eBPF 时至少开启一条。关闭的路径仍能保存全部偏好，但生成的 `runtime/inbound.json` 中该路径只包含 `{"enabled": false}`，不会把未启用的接口、DNS 或筛选参数交给核心。
 
-`EBPF_MODE` 支持 `local`（当前默认出口接口）、`shared`（下游接口）和 `hybrid`（两者同时启用）。两条数据路径均由 sing-box 使用 TC 管理。`EBPF_NETWORK` 留空表示 TCP 和 UDP，也可以填写 `tcp`、`udp` 或 `tcp,udp`。`EBPF_TC_PRIORITY` 用于与同一接口上的其他 TC filter 协调顺序，通常保持默认值。
+NetProxy 将两条路径省略或留空的 `data_plane` 均解析为 `socket_assign`，并在启用路径的运行时配置中显式输出；这不同于直接使用 sing-box 时的原生缺省值。已有显式 `cgroup` 或 `packet_rewrite` 不会被覆盖。管理器在本机和共享网络分组分别选择数据平面，不提供“内核默认”选项。
 
-## local
+本机 `local.data_plane` 支持：
 
-```ini
-EBPF_LOCAL_DNS_MODE="hijack"
-EBPF_LOCAL_IPV6=1
-EBPF_LOCAL_BYPASS_PRIVATE_ADDRESS=1
-EBPF_LOCAL_INCLUDE_UID=""
-EBPF_LOCAL_INCLUDE_UID_RANGE=""
-EBPF_LOCAL_EXCLUDE_UID=""
-EBPF_LOCAL_EXCLUDE_UID_RANGE=""
-EBPF_LOCAL_INCLUDE_ANDROID_USER=""
-EBPF_LOCAL_INCLUDE_PACKAGE=""
-EBPF_LOCAL_EXCLUDE_PACKAGE=""
-EBPF_LOCAL_BYPASS_PORT=""
-EBPF_LOCAL_BYPASS_PORT_RANGE=""
-```
+- `socket_assign`：推荐默认值，跟随当前默认出口接口，将本机 TCP/UDP 分配给透明监听器。
+- `cgroup`：兼容选项，在 socket 阶段接管本机 TCP/UDP，不依赖默认出口接口，需要 cgroup v2 和相应 socket hook。
 
-`EBPF_LOCAL_DNS_MODE` 支持 `hijack`、`respect_policy` 和 `off`。`hijack` 会优先接管所有可见的 53 端口流量；`respect_policy` 会先执行 UID、包名和目标地址策略。`EBPF_LOCAL_IPV6=0` 会让本机 IPv6 绕过该入站。local attachment 会跟随系统默认出口变化，切换期间由 sing-box 维护挂载状态。`EBPF_LOCAL_BYPASS_PRIVATE_ADDRESS` 控制本机数据路径是否在进入 sing-box 前绕过私网与特殊用途地址。
+旧本机 `local.data_plane: "tc"` 已不支持，配置会被拒绝，不会自动转换；请明确选择上述受支持值。切换数据平面不会修改应用代理、Root 或 DNS 策略。
 
-`EBPF_LOCAL_BYPASS_PORT` 填写单个目标端口，`EBPF_LOCAL_BYPASS_PORT_RANGE` 使用 `start:end`；多个值都使用英文逗号分隔。FakeIP 和 DNS 接管优先于端口绕过。`EBPF_LOCAL_INCLUDE_PACKAGE` 和 `EBPF_LOCAL_EXCLUDE_PACKAGE` 是高级用户直接填写的包名列表。分应用页面使用下方的带用户范围格式，Native 会调用 Android `cmd package list packages --user <用户ID> -U` 解析 UID。
+`local.cgroup_path` 只适用于 `cgroup`，可省略；设置时必须是 cgroup v2 绝对路径。在管理器明确切换到本机 `socket_assign` 时会移除此字段，其余筛选和 DNS 参数保持不变；切回 `cgroup` 不恢复旧路径。
 
-## 分应用代理
+共享网络 `shared.data_plane` 支持：
 
-```ini
-APP_PROXY_ENABLE=1
-APP_PROXY_MODE="blacklist"
-PROXY_APPS_LIST=""
-BYPASS_APPS_LIST="0:com.example.app,10:com.example.app"
-```
+- `socket_assign`：推荐默认值，支持以太网及 raw-IP、PPP 或受支持的隧道接口。
+- `packet_rewrite`：兼容选项，需要以太网帧，适用于普通热点或 LAN 下游接口。
 
-列表使用英文逗号分隔，每项必须是严格的 `<Android用户ID>:<包名>`。同一个包在不同用户下是两个独立条目。`blacklist` 中的 `BYPASS_APPS_LIST` 绕过代理；`whitelist` 中只有 `PROXY_APPS_LIST` 进入代理，Native 会自动加入 UID 0。
+`socket_assign` 是实验性机制，比兼容选项需要更多内核能力，包括网络命名空间、veth、透明 socket 与策略路由；本机和共享网络可以独立选择。缺少所选能力时明确报错，不会自动切换机制。具体要求可参考 [alpha.13 上游说明](https://github.com/reF1nd/sing-box/blob/v1.15.0-alpha.13-reF1nd/docs/configuration/inbound/ebpf.md)。
 
-包名变更、应用重装或用户范围变化后，重启或 reload 服务会重新解析 UID。包名解析失败时配置事务失败，不会留下半应用配置。
+启用共享网络时，`shared.interface` 必须包含至少一个真实下游接口，不能填写 loopback。`wlan2` 只是保存的默认偏好，不代表所有设备。接口出现、消失或成为默认上游时由 sing-box 管理 attachment；模块不会创建热点、DHCP、NAT、IPv6 RA 或 IP 转发。
 
-## shared
+### 默认上游接口（高级）
 
-```ini
-EBPF_SHARED_DNS_MODE="hijack"
-EBPF_SHARED_INTERFACES="wlan2"
-EBPF_SHARED_IPV6=1
-EBPF_SHARED_BYPASS_PRIVATE_ADDRESS=1
-EBPF_SHARED_INCLUDE_SOURCE_CIDR=""
-EBPF_SHARED_EXCLUDE_SOURCE_CIDR=""
-EBPF_SHARED_INCLUDE_MAC_ADDRESS=""
-EBPF_SHARED_EXCLUDE_MAC_ADDRESS=""
-EBPF_SHARED_BYPASS_PORT=""
-EBPF_SHARED_BYPASS_PORT_RANGE=""
-```
+`shared.default_interface` 默认 `false`：已配置的共享接口成为默认上游时暂时停止共享挂载，恢复为下游后重新挂载。
 
-`EBPF_SHARED_DNS_MODE` 与 local 独立，支持 `hijack`、`respect_policy` 和 `off`；`respect_policy` 会先执行来源 CIDR、MAC 与目标地址策略。仅启用 TCP 时也可以使用 DNS 劫持。`EBPF_SHARED_IPV6=0` 只关闭共享路径的 IPv6 接管，不会阻止系统自行转发 IPv6。`EBPF_SHARED_BYPASS_PRIVATE_ADDRESS` 独立控制共享网络数据路径的私网与特殊用途地址绕过。`shared` 和 `hybrid` 模式必须填写至少一个实际的下游接口。接口可以在服务启动后出现或消失，sing-box 会自动维护 TC 挂载；当该接口成为默认上游时会暂停 shared 接管。
+仅当客户端与上游路由器共用一个接口、并将本机作为网关时，才按需开启。开启后，该接口成为默认上游时仍接管来自其他设备的共享流量；本机流量仍由 `local` 控制，仍须填写 `shared.interface`。管理器入口位于入站页的“高级设置”。
 
-`EBPF_SHARED_BYPASS_PORT` 与 `EBPF_SHARED_BYPASS_PORT_RANGE` 的格式和 local 相同，仅作用于共享网络数据路径。共享网络不会创建热点、DHCP、NAT、IPv6 RA 或 IP 转发，这些仍由 Android 或系统网络栈负责。
+此项不会开启转发、同接口防火墙转发、NAT、DHCP、IPv6 RA 或热点；绕过的 IPv4 流量通常还需要系统配置 SNAT/masquerade，接入点也须允许客户端互通。普通热点与默认上游使用不同接口时无需开启。
+
+## DNS、IPv6 与绕过
+
+本机和共享网络各自设置 `dns_mode`、`ipv6`、`bypass_private_address`、`bypass_rule_set`、`bypass_port` 与 `bypass_port_range`：
+
+- `hijack`：优先接管可见的 TCP/UDP 53 流量。
+- `respect_policy`：先应用该路径的筛选与绕过策略，再接管 DNS；这是本机默认值。
+- `off`：不由该路径接管 DNS。
+
+`ipv6: false` 仅绕过该路径的 IPv6，不关闭系统 IPv6。`bypass_rule_set` 默认引用 `geoip/cn`，只使用可提取的 IP CIDR；命中流量不会进入普通路由，`Proxy` 模式也不能覆盖提前绕过。
+
+`bypass_port` 使用数字数组，例如 `[22, 443]`；`bypass_port_range` 使用字符串数组，例如 `["1000:2000"]`，不是逗号文本。
+
+eBPF `udp_timeout` 默认 `5m`，最小为 `5s`；可使用时长字符串或以秒为单位的 JSON 数字。此下限不适用于 TUN。
+
+## 原生筛选
+
+本机支持 `include_uid`、`exclude_uid`、UID range、`include_android_user`、`include_package` 和 `exclude_package`。共用 `app` 开启时可叠加原生 UID/range，排除优先，UID 0 也可手动加入或排除；原生 package/user 筛选需关闭共用策略后使用。
+
+共享网络支持 `include_source_cidr`、`exclude_source_cidr`、`include_mac_address` 和 `exclude_mac_address`，排除优先。共用应用名单只筛选本机应用，不用来识别热点客户端。
 
 ## 能力探测
-
-模块不再携带 `bpftool`。能力探测直接使用 sing-box 内置命令，不挂载程序、不修改实际流量：
 
 ```sh
 su -c '/data/adb/modules/netproxy/netproxyctl ebpf status configured'
 su -c '/data/adb/modules/netproxy/netproxyctl ebpf status all --raw'
 ```
 
-local 和 shared 都要求 TC classifier、透明 socket、socket lookup 与 `bpf_sk_assign` 等能力；local 还需要可用的 veth 与策略路由。厂商内核可能单独禁用或回移这些能力，兼容性以 sing-box 的运行时探测为准，不按内核版本猜测。cgroup socket hook 只用于可选的自身绕过与进程追踪优化，缺失时会回退用户态登记路径。
+`configured` 按保存的 eBPF 启用路径和数据平面检查，即使当前使用 TUN，也可检查 eBPF 能力。默认 `data.content` 是可读结论、问题与建议，`data.report` 保留结构化报告；`--raw` 让 `data.content` 返回核心原始 JSON。
 
-## 校验与应用
-
-```sh
-su -c '/data/adb/modules/netproxy/netproxyctl config check'
-su -c '/data/adb/modules/netproxy/netproxyctl service restart'
-```
+预检通过只表示所选能力检查通过，不代表已经完成实际挂载或网络接管。探测会加载并关闭临时检测对象，不会挂载程序或改变流量；厂商内核可能关闭或回移单项能力，应以实际探测和启动结果为准。

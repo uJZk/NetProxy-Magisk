@@ -22,6 +22,7 @@ import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Router
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -32,8 +33,10 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fanjv.netproxy.R
 import com.fanjv.netproxy.core.di.netProxyViewModel
+import com.fanjv.netproxy.core.module.ModuleConnectionState
 import com.fanjv.netproxy.core.ui.component.AppSnackbarHost
 import com.fanjv.netproxy.core.ui.component.BlurredBar
+import com.fanjv.netproxy.core.ui.component.LocalModuleAvailability
 import com.fanjv.netproxy.core.ui.component.SnackbarNoticeEffect
 import com.fanjv.netproxy.core.ui.component.WarningCard
 import com.fanjv.netproxy.core.ui.component.rememberAppSnackbarHostState
@@ -46,6 +49,8 @@ import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TopAppBar
 import top.yukonga.miuix.kmp.blur.layerBackdrop
+import top.yukonga.miuix.kmp.icon.MiuixIcons
+import top.yukonga.miuix.kmp.icon.extended.Link
 import top.yukonga.miuix.kmp.preference.ArrowPreference
 import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -60,17 +65,19 @@ internal fun CatalogDashboardScreen(
     bottomPadding: androidx.compose.ui.unit.Dp = 0.dp,
     isActive: Boolean = true,
     onNavigateToNodes: () -> Unit = {},
+    onReconnect: () -> Unit = {},
     viewModel: CatalogDashboardViewModel = netProxyViewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val availability = LocalModuleAvailability.current
+    LaunchedEffect(availability) { viewModel.setAvailability(availability) }
     val snackbarHostState = rememberAppSnackbarHostState()
     val scrollBehavior = MiuixScrollBehavior()
     val backdrop = rememberBlurBackdrop()
     val barColor = if (backdrop != null) Color.Transparent else colorScheme.surface
-    val noRootMessage =
-        "${stringResource(R.string.no_root_title)}\n${stringResource(R.string.no_root_summary)}"
     val noModuleMessage =
-        "${stringResource(R.string.no_module_title)}\n${stringResource(R.string.no_module_summary)}"
+        if (availability?.state == ModuleConnectionState.UNTRUSTED) stringResource(R.string.module_identity_failed)
+        else "${stringResource(R.string.no_module_title)}\n${stringResource(R.string.no_module_summary)}"
 
     LifecycleResumeEffect(isActive) {
         viewModel.setVisible(isActive)
@@ -111,13 +118,9 @@ internal fun CatalogDashboardScreen(
                 contentPadding = innerPadding,
                 overscrollEffect = null
             ) {
-                if (state.rootChecked && !state.rootGranted) {
+                if (state.connection != null && !state.connected) {
                     item {
-                        DashboardWarning(noRootMessage)
-                    }
-                } else if (state.rootChecked && !state.moduleInstalled) {
-                    item {
-                        DashboardWarning(noModuleMessage)
+                        DashboardWarning(noModuleMessage, onReconnect)
                     }
                 } else if (state.serviceState == "failed" && state.serviceError.isNotBlank()) {
                     item { DashboardWarning(state.serviceError) }
@@ -139,8 +142,7 @@ internal fun CatalogDashboardScreen(
                         trafficSamples = state.trafficSamples,
                         statusSummary = serviceSummary,
                         isRunning = state.isReady,
-                        serviceControlEnabled = state.rootGranted &&
-                            state.moduleInstalled &&
+                        serviceControlEnabled = availability?.available == true && state.connected &&
                             !state.loading &&
                             !state.isServiceControlBusy,
                         modifier = Modifier.padding(top = 12.dp),
@@ -179,48 +181,52 @@ internal fun CatalogDashboardScreen(
                 item { Spacer(Modifier.height(12.dp)) }
                 item {
                     Card(modifier = Modifier.fillMaxWidth()) {
-                        val modeValues = listOf("rule", "global", "direct", "AllowAds")
-                        val modeLabels = listOf(
-                            stringResource(R.string.dashboard_mode_rule),
-                            stringResource(R.string.dashboard_mode_global),
-                            stringResource(R.string.dashboard_mode_direct),
-                            stringResource(R.string.dashboard_mode_allow_ads)
-                        )
+                        val modeValues = state.availableOutboundModes
+                        val modeLabels = modeValues.map { mode ->
+                            when (mode) {
+                                "Rule" -> stringResource(R.string.dashboard_mode_rule)
+                                "Proxy" -> stringResource(R.string.dashboard_mode_proxy)
+                                "Direct" -> stringResource(R.string.dashboard_mode_direct)
+                                "RuleAllowAds" -> stringResource(R.string.dashboard_mode_rule_allow_ads)
+                                else -> mode
+                            }
+                        }
                         val selectedModeIndex = modeValues.indexOf(state.outboundMode)
                         val modeItems = if (selectedModeIndex >= 0) {
                             modeLabels
                         } else {
-                            listOf(stringResource(R.string.dashboard_mode_unknown)) + modeLabels
+                            listOf(
+                                if (state.outboundMode == "unknown") stringResource(R.string.dashboard_mode_unknown)
+                                else state.outboundMode
+                            ) + modeLabels
                         }
                         OverlayDropdownPreference(
                             title = stringResource(R.string.dashboard_outbound_mode),
+                            enabled = availability?.available == true && !state.loading,
                             items = modeItems,
                             selectedIndex = if (selectedModeIndex >= 0) selectedModeIndex else 0,
                             startAction = {
                                 Icon(
                                     imageVector = Icons.AutoMirrored.Rounded.AltRoute,
                                     contentDescription = null,
-                                    modifier = Modifier.padding(end = 12.dp),
                                     tint = colorScheme.primary
                                 )
                             },
                             onSelectedIndexChange = { index ->
                                 val actualIndex = if (selectedModeIndex >= 0) index else index - 1
-                                if (actualIndex in modeValues.indices && state.rootGranted && state.moduleInstalled && !state.loading) {
-                                    viewModel.setMode(modeValues[actualIndex])
-                                }
+                                modeValues.getOrNull(actualIndex)?.let(viewModel::setMode)
                             }
                         )
                         ArrowPreference(
                             title = stringResource(R.string.dashboard_current_node),
+                            enabled = availability?.available == true,
                             summary = state.currentNode.ifBlank {
                                 stringResource(R.string.dashboard_not_selected)
                             },
                             startAction = {
                                 Icon(
-                                    imageVector = Icons.Rounded.Router,
+                                    imageVector = MiuixIcons.Link,
                                     contentDescription = null,
-                                    modifier = Modifier.padding(end = 12.dp),
                                     tint = colorScheme.primary
                                 )
                             },
@@ -274,7 +280,7 @@ private fun ResourceUsageCard(
             )
             Text(
                 text = title,
-                modifier = Modifier.padding(start = 8.dp),
+                modifier = Modifier.weight(1f).padding(start = 8.dp),
                 style = MiuixTheme.textStyles.body2,
                 color = colorScheme.onSurfaceVariantSummary
             )
@@ -288,9 +294,10 @@ private fun ResourceUsageCard(
 }
 
 @Composable
-private fun DashboardWarning(message: String) {
+private fun DashboardWarning(message: String, onClick: (() -> Unit)? = null) {
     WarningCard(
         message = message,
+        onClick = onClick,
         modifier = Modifier
             .padding(top = 12.dp)
             .fillMaxWidth(),

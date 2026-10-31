@@ -2,12 +2,16 @@
 package catalog
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/logfile"
 )
 
 const (
@@ -18,7 +22,7 @@ const (
 )
 
 // CommitPair 原子提交一组 Catalog 的 Provider 与元数据文件。
-func CommitPair(root, groupDir string, providerContent, metadataContent []byte) error {
+func CommitPair(ctx context.Context, root, groupDir string, providerContent, metadataContent []byte) error {
 	if strings.TrimSpace(root) == "" || strings.TrimSpace(groupDir) == "" {
 		return errors.New("catalog transaction target is empty")
 	}
@@ -26,7 +30,7 @@ func CommitPair(root, groupDir string, providerContent, metadataContent []byte) 
 	if !isValidGroupID(groupID) {
 		return fmt.Errorf("非法 Catalog 分组 ID: %s", groupID)
 	}
-	release, err := acquireCatalogMutation(root, groupID)
+	release, err := acquireCatalogMutation(ctx, root, groupID)
 	if err != nil {
 		return err
 	}
@@ -59,7 +63,7 @@ func commitPairLocked(root, groupDir string, providerContent, metadataContent []
 		_ = os.RemoveAll(txDir)
 		return err
 	}
-	if err := writeSynced(journalPath, []byte("begin\nprovider\nmeta\n"+lockOwnerJournal()), 0o600); err != nil {
+	if err := writeSynced(journalPath, []byte("begin\nprovider\nmeta\n"), 0o600); err != nil {
 		_ = os.RemoveAll(txDir)
 		return err
 	}
@@ -73,31 +77,32 @@ func commitPairLocked(root, groupDir string, providerContent, metadataContent []
 	}
 
 	if err := moveExisting(groupDir, txDir, "provider.json"); err != nil {
-		rollback(txDir)
-		return err
+		return errors.Join(err, rollback(txDir))
 	}
 	if err := moveExisting(groupDir, txDir, "meta.json"); err != nil {
-		rollback(txDir)
-		return err
+		return errors.Join(err, rollback(txDir))
 	}
 	if err := install(txDir, groupDir, "provider.json"); err != nil {
-		rollback(txDir)
-		return err
+		return errors.Join(err, rollback(txDir))
 	}
 	if err := install(txDir, groupDir, "meta.json"); err != nil {
-		rollback(txDir)
-		return err
+		return errors.Join(err, rollback(txDir))
 	}
 	if err := appendSynced(journalPath, []byte("commit\n")); err != nil {
-		rollback(txDir)
-		return err
+		// commit 可能已写入但未同步，回滚前必须先持久化未提交状态。
+		if resetErr := writeSynced(journalPath, []byte("begin\nprovider\nmeta\n"), 0o600); resetErr != nil {
+			return errors.Join(err, resetErr)
+		}
+		return errors.Join(err, rollback(txDir))
 	}
-	return os.RemoveAll(txDir)
+	// 数据已提交，临时文件清理失败不改变提交结果；下次恢复继续清理。
+	cleanupCompletedTransaction(txDir)
+	return nil
 }
 
 // Recover 清理启动前遗留的 Catalog 事务目录并恢复未完成提交。
-func Recover(root string) error {
-	release, err := AcquireRoot(root)
+func Recover(ctx context.Context, root string) error {
+	release, err := AcquireRoot(ctx, root)
 	if err != nil {
 		return err
 	}
@@ -135,45 +140,42 @@ func recoverTransactionsLocked(root string) error {
 func recoverTransaction(txDir string) error {
 	journaling, err := os.ReadFile(filepath.Join(txDir, journalName))
 	if err != nil {
-		return os.RemoveAll(txDir)
+		if errors.Is(err, os.ErrNotExist) {
+			return discardUnstartedTransaction(txDir, err)
+		}
+		return err
 	}
 	lines := strings.Split(strings.TrimRight(string(journaling), "\r\n"), "\n")
 	if len(lines) < 3 || lines[0] != "begin" || lines[1] != "provider" || lines[2] != "meta" {
-		return os.RemoveAll(txDir)
+		return discardUnstartedTransaction(txDir, errors.New("Catalog 事务日志不完整"))
 	}
-	if slices.Contains(lines[3:], "commit") {
-		return os.RemoveAll(txDir)
+	if slices.Contains(lines[3:], "commit") || slices.Contains(lines[3:], "rolled_back") {
+		cleanupCompletedTransaction(txDir)
+		return nil
 	}
-	target, err := os.ReadFile(filepath.Join(txDir, targetName))
-	if err != nil || strings.TrimSpace(string(target)) == "" {
-		return os.RemoveAll(txDir)
-	}
-	groupDir := strings.TrimSpace(string(target))
-	for _, name := range []string{"provider.json", "meta.json"} {
-		finalPath := filepath.Join(groupDir, name)
-		backupPath := filepath.Join(txDir, name+".bak")
-		if transactionFileExists(backupPath) {
-			if err := os.Remove(finalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			if err := os.Rename(backupPath, finalPath); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(txDir, name)); errors.Is(err, os.ErrNotExist) {
-			if err := os.Remove(finalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
+	return rollback(txDir)
+}
+
+func discardUnstartedTransaction(txDir string, cause error) error {
+	for _, name := range []string{"provider.json.bak", "meta.json.bak"} {
+		if _, err := os.Stat(filepath.Join(txDir, name)); !errors.Is(err, os.ErrNotExist) {
+			return errors.Join(cause, err)
 		}
 	}
-	return os.RemoveAll(txDir)
+	return cleanupTransaction(txDir)
 }
 
 func moveExisting(groupDir, txDir, name string) error {
 	source := filepath.Join(groupDir, name)
-	if !transactionFileExists(source) {
+	info, err := os.Stat(source)
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("Catalog 事务目标不是文件: %s", source)
 	}
 	if err := os.Rename(source, filepath.Join(txDir, name+".bak")); err != nil {
 		return err
@@ -195,24 +197,76 @@ func install(txDir, groupDir, name string) error {
 // transactionRenameHook 仅供同包测试模拟 rename 完成后的进程中断。
 var transactionRenameHook = func(string) {}
 
-func rollback(txDir string) {
+func rollback(txDir string) error {
 	target, err := os.ReadFile(filepath.Join(txDir, targetName))
 	if err != nil {
-		_ = os.RemoveAll(txDir)
-		return
+		return err
 	}
 	groupDir := strings.TrimSpace(string(target))
+	if groupDir == "" {
+		return errors.New("Catalog 事务缺少恢复目标")
+	}
 	for _, name := range []string{"provider.json", "meta.json"} {
 		finalPath := filepath.Join(groupDir, name)
 		backupPath := filepath.Join(txDir, name+".bak")
-		if transactionFileExists(backupPath) {
-			_ = os.Remove(finalPath)
-			_ = os.Rename(backupPath, finalPath)
+		if _, err := os.Stat(backupPath); err == nil {
+			// 备份直到整组恢复成功才删除，否则二次恢复会把已恢复文件误认为新增文件。
+			if err := restoreTransactionFile(backupPath, finalPath); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
 		} else if _, err := os.Stat(filepath.Join(txDir, name)); errors.Is(err, os.ErrNotExist) {
-			_ = os.Remove(finalPath)
+			if err := os.Remove(finalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		} else if err != nil {
+			return err
 		}
 	}
-	_ = os.RemoveAll(txDir)
+	// 清理可能再次中断，先记录恢复完成，防止部分备份已删除后重复回滚。
+	if err := appendSynced(filepath.Join(txDir, journalName), []byte("rolled_back\n")); err != nil {
+		return err
+	}
+	cleanupCompletedTransaction(txDir)
+	return nil
+}
+
+func cleanupTransaction(txDir string) error {
+	// 完成标记必须晚于所有备份删除，否则清理中断会留下无法判定的事务。
+	for _, name := range []string{"provider.json.bak", "meta.json.bak"} {
+		if err := os.Remove(filepath.Join(txDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return os.RemoveAll(txDir)
+}
+
+func cleanupCompletedTransaction(txDir string) {
+	if err := cleanupTransaction(txDir); err != nil {
+		fmt.Fprintln(os.Stderr, logfile.FormatEntry(logfile.Entry{
+			Level: "WARN", Component: "catalog", Event: "transaction.cleanup", Result: "pending",
+			Message: fmt.Sprintf("事务已完成，临时文件清理将重试: %v", err),
+		}))
+	}
+}
+
+func restoreTransactionFile(backup, target string) error {
+	source, err := os.Open(backup)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	file, err := os.CreateTemp(filepath.Dir(target), ".catalog-restore-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	_, copyErr := io.Copy(file, source)
+	if err := errors.Join(copyErr, file.Chmod(0o600), file.Sync(), file.Close()); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), target)
 }
 
 func writeSynced(path string, content []byte, mode os.FileMode) error {
@@ -249,9 +303,4 @@ func appendSynced(path string, content []byte) error {
 		return err
 	}
 	return file.Close()
-}
-
-func transactionFileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }

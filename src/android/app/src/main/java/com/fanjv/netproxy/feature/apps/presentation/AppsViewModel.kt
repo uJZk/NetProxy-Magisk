@@ -1,96 +1,116 @@
 package com.fanjv.netproxy.feature.apps.presentation
 
-import androidx.compose.runtime.State
-import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.fanjv.netproxy.core.ui.component.SearchStatus
+import com.fanjv.netproxy.core.config.ConfigurationWrites
 import com.fanjv.netproxy.core.ui.userMessage
+import com.fanjv.netproxy.feature.apps.data.AppIconCache
 import com.fanjv.netproxy.feature.apps.data.AppPackageRepository
 import com.fanjv.netproxy.feature.apps.data.AppPolicyRepository
 import com.fanjv.netproxy.feature.apps.model.AppProxyConfig
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.util.concurrent.ConcurrentHashMap
 
-/** 管理 Android 应用清单与 netproxyctl 分应用策略。 */
+/** 管理 Android 应用清单与模块分应用策略。 */
 internal class AppsViewModel(
     private val repository: AppPolicyRepository,
-    private val packageCatalog: AppPackageRepository
-) : ViewModel() {
-    private val labels = ConcurrentHashMap<String, String>()
-    private val packageLabels = ConcurrentHashMap<String, String>()
+    private val packageCatalog: AppPackageRepository,
+    scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+    private val modelDispatcher: CoroutineDispatcher = Dispatchers.Default,
+    private val writes: ConfigurationWrites = ConfigurationWrites(scope),
+) : ViewModel(scope) {
     private val _state = MutableStateFlow(AppsUiState())
     val state: StateFlow<AppsUiState> = _state.asStateFlow()
-    private val _searchStatus = mutableStateOf(SearchStatus(""))
-    val searchStatus: State<SearchStatus> = _searchStatus
     private var loadJob: Job? = null
     private var modelJob: Job? = null
-    private var searchJob: Job? = null
+    private var mutationJob: Job? = null
+    private var loadRevision = 0L
+    private var modelRevision = 0L
+    private var confirmedConfig = AppProxyConfig()
+    private var policyConfirmed = false
+    private var draftConfig: AppProxyConfig? = null
+    private var requestedConfig: AppProxyConfig? = null
     private val policyMutationMutex = Mutex()
-    private val packageLookupDispatcher = Dispatchers.IO.limitedParallelism(4)
     private var loaded = false
 
     fun load(force: Boolean = false) {
-        if (loadJob?.isActive == true || (!force && loaded)) return
+        if (_state.value.requiresPolicyReload) return
+        if (!force && (loadJob?.isActive == true || loaded)) return
+        val revision = ++loadRevision
+        loadJob?.cancel()
+        if (force) {
+            modelRevision++
+            modelJob?.cancel()
+            loaded = false
+        }
+        _state.update { it.copy(isLoadingApps = true, error = "") }
         loadJob = viewModelScope.launch {
-            _state.update { it.copy(isLoadingApps = true, error = "") }
-            if (force) {
-                packageCatalog.invalidatePackageListingCaches()
-                loaded = false
-            }
-            runCatching {
-                coroutineScope {
-                    val config = async { repository.config() }
-                    val users = async { packageCatalog.getUsers() }
-                    config.await() to users.await()
-                }
-            }.onSuccess { (config, users) ->
-                val selected = activeItems(config).toSet()
-                resolveLabels(selected.mapNotNull(::splitAppId))
-                val master = withContext(Dispatchers.IO) {
-                    users.map { user ->
-                        async {
-                            val system = packageCatalog.getInstalledPackages(user.id, "system")
-                            val regular = packageCatalog.getInstalledPackages(user.id, "user")
-                            resolveLabels((system + regular).map { it to user.id })
-                            buildList {
-                                system.forEach { add(appModel(it, user.id, true)) }
-                                regular.forEach { add(appModel(it, user.id, false)) }
+            try {
+                if (force) packageCatalog.invalidatePackageListingCaches()
+                val snapshot = coroutineScope {
+                    val config = async {
+                        policyMutationMutex.withLock {
+                            if (draftConfig != null || _state.value.isSavingPolicy) return@withLock draftConfig ?: confirmedConfig
+                            val result = repository.config()
+                            currentCoroutineContext().ensureActive()
+                            if (revision == loadRevision && draftConfig == null && !_state.value.isSavingPolicy) {
+                                confirmedConfig = result
+                                policyConfirmed = true
+                                publishPolicy()
                             }
+                            result
                         }
-                    }.awaitAll().flatten()
+                    }
+                    val snapshot = async { packageCatalog.snapshot() }
+                    config.await()
+                    snapshot.await()
                 }
+                val master = withContext(Dispatchers.Default) {
+                    snapshot.users.flatMap { user ->
+                        user.apps.map { app ->
+                            currentCoroutineContext().ensureActive()
+                            AppInfoModel(app.packageName, app.label, user.id.toString(), app.system, app.iconKey)
+                        }
+                    }
+                }
+                currentCoroutineContext().ensureActive()
+                if (revision != loadRevision) return@launch
                 loaded = true
                 _state.update {
                     it.copy(
-                        appProxyEnabled = config.enabled,
-                        appProxyMode = config.mode,
-                        proxyApps = parsePackages(config.proxyApps),
-                        bypassApps = parsePackages(config.bypassApps),
-                        proxiedApps = selected,
                         masterAppList = master,
                         isLoadingApps = false,
-                        hasLoadedApps = true,
-                        error = ""
+                        hasLoadedApps = true
                     )
                 }
                 applyFilterAndSort()
-            }.onFailure { error ->
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                currentCoroutineContext().ensureActive()
+                if (revision != loadRevision) return@launch
                 _state.update {
                     it.copy(
                         isLoadingApps = false,
+                        isFilteringApps = false,
                         hasLoadedApps = true,
                         error = error.userMessage()
                     )
@@ -100,68 +120,60 @@ internal class AppsViewModel(
     }
 
     fun setProxySettings(enabled: Boolean, mode: String? = null) {
-        val previous = _state.value
-        _state.update {
-            it.copy(
-                appProxyEnabled = enabled,
-                appProxyMode = mode ?: it.appProxyMode,
-                proxiedApps = if (mode == null) it.proxiedApps else activeItems(
-                    mode,
-                    it.proxyApps,
-                    it.bypassApps
-                ),
-                error = ""
-            )
-        }
-        viewModelScope.launch {
-            policyMutationMutex.withLock {
-                runCatching {
-                    if (enabled && mode != null) repository.setMode(mode)
-                    else repository.setEnabled(enabled)
-                }.onFailure { error ->
-                    _state.update {
-                        it.copy(
-                            appProxyEnabled = previous.appProxyEnabled,
-                            appProxyMode = previous.appProxyMode,
-                            proxyApps = previous.proxyApps,
-                            bypassApps = previous.bypassApps,
-                            proxiedApps = previous.proxiedApps,
-                            error = error.userMessage()
-                        )
-                    }
-                    refreshConfig()
-                }.onSuccess { config ->
-                    applyPolicyConfig(config)
-                    applyFilterAndSort()
-                }
-            }
-        }
+        editPolicy { it.copy(enabled = enabled, mode = if (enabled && mode != null) mode else it.mode) }
     }
 
     fun toggle(appId: String) {
-        val wasSelected = _state.value.proxiedApps.contains(appId)
-        _state.update {
-            val updated = if (wasSelected) {
-                it.proxiedApps - appId
-            } else {
-                it.proxiedApps + appId
-            }
-            it.copy(proxiedApps = updated, error = "")
+        editPolicy { config ->
+            val items = activeItems(config)
+            val updated = (if (appId in items) items - appId else items + appId).toList()
+            if (config.mode == "blacklist") config.copy(bypassApps = updated) else config.copy(proxyApps = updated)
         }
-        applyFilterAndSort()
-        viewModelScope.launch {
-            policyMutationMutex.withLock {
-                runCatching {
-                    if (wasSelected) repository.remove(appId) else repository.add(appId)
-                }.onFailure { error ->
-                    _state.update { it.copy(error = error.userMessage()) }
-                    refreshConfig()
-                }.onSuccess { config ->
-                    applyPolicyConfig(config)
-                    applyFilterAndSort()
+    }
+
+    private fun editPolicy(transform: (AppProxyConfig) -> AppProxyConfig) {
+        if (!policyConfirmed) return
+        draftConfig = transform(draftConfig ?: confirmedConfig).takeIf(::policyChanged)
+        publishPolicy()
+    }
+
+    fun requestPolicyFlush() {
+        if (!policyConfirmed || (draftConfig == null && mutationJob?.isActive != true)) return
+        requestedConfig = draftConfig ?: confirmedConfig
+        if (mutationJob?.isActive == true) return
+        _state.update { it.copy(isSavingPolicy = true) }
+        mutationJob = writes.launch("inbound/app", write = {
+            try {
+                policyMutationMutex.withLock {
+                    while (requestedConfig != null) {
+                        val requested = requestedConfig!!.copy(revision = confirmedConfig.revision)
+                        requestedConfig = null
+                        if (!policyChanged(requested)) continue
+                        val applied = repository.apply(requested)
+                        currentCoroutineContext().ensureActive()
+                        val latest = draftConfig ?: confirmedConfig
+                        confirmedConfig = applied
+                        // 确认结果只推进 revision，不能覆盖写入期间的新意图或撤销。
+                        draftConfig = latest.copy(revision = applied.revision).takeIf(::policyChanged)
+                        publishPolicy()
+                    }
                 }
+            } finally {
+                _state.update { it.copy(isSavingPolicy = false) }
+                publishPolicy(_state.value.error)
             }
-        }
+        }, onFailure = { error ->
+            requestedConfig = null
+            policyConfirmed = false
+            _state.update { it.copy(requiresPolicyReload = true, error = error.userMessage()) }
+        })
+    }
+
+    fun discardPolicyAndReload() {
+        if (mutationJob?.isActive == true) return
+        draftConfig = null
+        _state.update { it.copy(requiresPolicyReload = false, hasPendingPolicy = false) }
+        load(force = true)
     }
 
     fun setShowSystemApps(show: Boolean) {
@@ -171,7 +183,6 @@ internal class AppsViewModel(
 
     fun setSelectedFirst(enabled: Boolean) {
         _state.update { it.copy(appSelectedFirst = enabled) }
-        applyFilterAndSort()
     }
 
     fun setReverseSort(enabled: Boolean) {
@@ -184,99 +195,48 @@ internal class AppsViewModel(
     }
 
     fun updateSearch(query: String) {
-        _state.update { it.copy(appSearchQuery = query) }
-        _searchStatus.value.searchText = query
-        searchJob?.cancel()
-        if (query.isEmpty()) {
-            _searchStatus.value.resultStatus = SearchStatus.ResultStatus.DEFAULT
-            _state.update { it.copy(searchResults = emptyList()) }
-            return
+        if (_state.value.appSearchQuery == query) return
+        _state.update {
+            it.copy(appSearchQuery = query, searchResults = emptyList())
         }
-        searchJob = viewModelScope.launch(Dispatchers.Default) {
-            _searchStatus.value.resultStatus = SearchStatus.ResultStatus.LOAD
-            val result = _state.value.allApps.filter {
-                it.label.contains(query, ignoreCase = true) ||
-                        it.packageName.contains(query, ignoreCase = true)
-            }
-            if (_state.value.appSearchQuery != query) return@launch
-            _state.update { it.copy(searchResults = result) }
-            _searchStatus.value.resultStatus = if (result.isEmpty()) {
-                SearchStatus.ResultStatus.EMPTY
-            } else {
-                SearchStatus.ResultStatus.SHOW
-            }
-        }
-    }
-
-    private fun refreshConfig() {
-        viewModelScope.launch {
-            runCatching { repository.config() }
-                .onSuccess { config ->
-                    val selected = activeItems(config).toSet()
-                    resolveLabels(selected.mapNotNull(::splitAppId))
-                    applyPolicyConfig(config)
-                    applyFilterAndSort()
-                }
-                .onFailure { error -> _state.update { it.copy(error = error.userMessage()) } }
-        }
+        applyFilterAndSort()
     }
 
     private fun applyFilterAndSort() {
+        val revision = ++modelRevision
         modelJob?.cancel()
-        modelJob = viewModelScope.launch(Dispatchers.Default) {
-            val snapshot = _state.value
-            var apps = snapshot.masterAppList
-                .asSequence()
-                .filter { snapshot.showSystemApps || !it.isSystem }
-                .map { app ->
-                    app.copy(
-                        isProxied = snapshot.proxiedApps.contains(app.id),
-                        label = labels["${app.userId}:${app.packageName}"] ?: app.label
-                    )
-                }
-                .toList()
-            val comparator = if (snapshot.appSelectedFirst) {
-                compareByDescending<AppInfoModel> { it.isProxied }
-                    .then(appLabelComparator)
-            } else {
-                appLabelComparator
+        val snapshot = _state.value
+        _state.update { it.copy(isFilteringApps = true) }
+        modelJob = viewModelScope.launch {
+            val (apps, search) = withContext(modelDispatcher) {
+                calculateAppsList(snapshot)
             }
-            apps = apps.sortedWith(comparator)
-            if (snapshot.appReverseSort) apps = apps.reversed()
-            val query = snapshot.appSearchQuery
-            val search = if (query.isBlank()) emptyList() else apps.filter {
-                it.label.contains(query, true) || it.packageName.contains(query, true)
+            currentCoroutineContext().ensureActive()
+            if (revision != modelRevision) return@launch
+            _state.update {
+                it.copy(allApps = apps, searchResults = search, isFilteringApps = false)
             }
-            _state.update { it.copy(allApps = apps, searchResults = search) }
         }
     }
 
-    private suspend fun resolveLabels(packageIds: List<Pair<String, String>>) {
-        coroutineScope {
-            packageIds.distinct().map { (packageName, userId) ->
-                async(packageLookupDispatcher) {
-                    val key = "$userId:$packageName"
-                    if (labels.containsKey(key)) return@async
-                    val label = packageLabels.computeIfAbsent(packageName) {
-                        packageCatalog.label(packageName)
+    suspend fun loadIcons(references: List<String>) = coroutineScope {
+        val generation = AppIconCache.generation
+        val ids = references.toSet()
+        val slots = Semaphore(4)
+        _state.value.masterAppList.filter { it.id in ids }.map { it.iconKey }.distinct()
+            .filter { it.isNotEmpty() && AppIconCache.cachedIcon(it) == null }.map { key ->
+                async {
+                    slots.withPermit {
+                        try { AppIconCache.putIcon(key, packageCatalog.icon(key), generation) }
+                        catch (error: CancellationException) { throw error }
+                        catch (_: Exception) { }
                     }
-                    labels[key] = label
                 }
             }.awaitAll()
-        }
     }
 
-    private fun appModel(packageName: String, userId: String, isSystem: Boolean) =
-        AppInfoModel(
-            packageName = packageName,
-            label = labels["$userId:$packageName"] ?: packageName,
-            isProxied = false,
-            userId = userId,
-            isSystem = isSystem
-        )
-
     private fun activeItems(config: AppProxyConfig): Set<String> =
-        activeItems(config.mode, parsePackages(config.proxyApps), parsePackages(config.bypassApps))
+        activeItems(config.mode, config.proxyApps.toSet(), config.bypassApps.toSet())
 
     private fun activeItems(
         mode: String,
@@ -284,12 +244,10 @@ internal class AppsViewModel(
         bypassApps: Set<String>
     ): Set<String> = if (mode == "blacklist") bypassApps else proxyApps
 
-    private fun parsePackages(value: String): Set<String> =
-        value.split(',').map(String::trim).filter(String::isNotBlank).toSet()
-
-    private fun applyPolicyConfig(config: AppProxyConfig) {
-        val proxyApps = parsePackages(config.proxyApps)
-        val bypassApps = parsePackages(config.bypassApps)
+    private fun publishPolicy(error: String = "") {
+        val config = draftConfig ?: confirmedConfig
+        val proxyApps = config.proxyApps.toSet()
+        val bypassApps = config.bypassApps.toSet()
         _state.update {
             it.copy(
                 appProxyEnabled = config.enabled,
@@ -297,16 +255,42 @@ internal class AppsViewModel(
                 proxyApps = proxyApps,
                 bypassApps = bypassApps,
                 proxiedApps = activeItems(config.mode, proxyApps, bypassApps),
-                error = ""
+                hasPendingPolicy = draftConfig != null || it.isSavingPolicy,
+                error = error
             )
         }
     }
 
-    private fun splitAppId(value: String): Pair<String, String>? {
-        val separator = value.indexOf(':')
-        if (separator <= 0 || separator == value.lastIndex) return null
-        return value.substring(separator + 1) to value.substring(0, separator)
+    private fun policyChanged(config: AppProxyConfig) =
+        config.enabled != confirmedConfig.enabled || config.mode != confirmedConfig.mode ||
+            config.proxyApps.toSet() != confirmedConfig.proxyApps.toSet() ||
+            config.bypassApps.toSet() != confirmedConfig.bypassApps.toSet()
+
+}
+
+internal suspend fun calculateAppsList(
+    snapshot: AppsUiState,
+): Pair<List<AppInfoModel>, List<AppInfoModel>> {
+    val context = currentCoroutineContext()
+    var apps = snapshot.masterAppList
+        .asSequence()
+        .filter {
+            context.ensureActive()
+            snapshot.showSystemApps || !it.isSystem
+        }
+        .toList()
+    apps = apps.sortedWith { left, right ->
+        context.ensureActive()
+        appLabelComparator.compare(left, right)
     }
+    if (snapshot.appReverseSort) apps = apps.reversed()
+    val query = snapshot.appSearchQuery
+    val search = if (query.isBlank()) emptyList() else apps.filter {
+        context.ensureActive()
+        it.label.contains(query, true) || it.packageName.contains(query, true)
+    }
+    context.ensureActive()
+    return apps to search
 }
 
 private val appLabelComparator = Comparator<AppInfoModel> { left, right ->

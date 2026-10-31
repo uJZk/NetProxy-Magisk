@@ -1,46 +1,110 @@
 package module
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
-	"slices"
 	"testing"
+	"time"
 )
 
-// 直通模式绝不能再带上 -C confdir：sing-box 合并多份配置是数组追加，
-// 托管配置会和用户配置叠加出重复的 inbounds、dns.servers 与出站标签。
-func TestConfigArgsSelectRawConfiguration(t *testing.T) {
-	raw := PrepareResult{
-		Raw:         true,
-		RawConfig:   "/m/config/singbox/raw.json",
-		RawServices: "/m/config/singbox/confdir/08_services.json",
+func TestRawUpdateAndFailurePreservesConfig(t *testing.T) {
+	root := t.TempDir()
+	o := newTestOptions(root)
+	o.SingBoxPath = filepath.Join(root, "sing-box")
+	if err := os.WriteFile(o.SingBoxPath, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
 	}
-	args := raw.ConfigArgs("/m/config/singbox")
-	// 不能注入模块生成的 ebpf.json：配置里已有 ebpf 入站时会叠加成两个。
-	want := []string{
-		"-c", "/m/config/singbox/raw.json",
-		"-c", "/m/config/singbox/confdir/08_services.json",
+	if err := os.MkdirAll(o.SingBoxDir, 0700); err != nil {
+		t.Fatal(err)
 	}
-	if !slices.Equal(args, want) {
-		t.Fatalf("raw args = %v, want %v", args, want)
+	body := `{"outbounds":[{"type":"direct","tag":"first"}]}`
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status); _, _ = w.Write([]byte(body)) }))
+	defer srv.Close()
+	ctx := context.Background()
+	if err := SetRawConfigSource(ctx, o, srv.URL, 3600, ""); err != nil {
+		t.Fatal(err)
 	}
-	if slices.Contains(args, "-C") {
-		t.Fatal("raw mode must not load the managed confdir")
+	if _, err := UpdateRawConfig(ctx, o, true); err != nil {
+		t.Fatal(err)
 	}
-	for _, argument := range args {
-		if filepath.Base(argument) == "ebpf.json" {
-			t.Fatal("raw mode must not inject a generated eBPF inbound")
-		}
+	_, p, _ := rawPaths(o)
+	got, err := os.ReadFile(p)
+	if err != nil || string(got) != body {
+		t.Fatalf("download: %s %v", got, err)
+	}
+	status = http.StatusInternalServerError
+	body = "fail"
+	if _, err := UpdateRawConfig(ctx, o, true); err == nil {
+		t.Fatal("expected download failure")
+	}
+	got, err = os.ReadFile(p)
+	if err != nil || string(got) != `{"outbounds":[{"type":"direct","tag":"first"}]}` {
+		t.Fatalf("old config lost: %s %v", got, err)
+	}
+	state, err := ReadRawConfig(o)
+	if err != nil || !state.Installed || state.Meta.NextUpdateEpoch <= time.Now().Unix() {
+		t.Fatalf("bad state %#v %v", state, err)
+	}
+}
+func TestRawSettingsToggleWhenStopped(t *testing.T) {
+	root := t.TempDir()
+	o := newTestOptions(root)
+	o.SingBoxPath = filepath.Join(root, "sing-box")
+	if err := os.WriteFile(o.SingBoxPath, []byte("#!/bin/sh\n[ -f \"$3\" ]\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(o.SingBoxDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, p, _ := rawPaths(o)
+	if err := os.WriteFile(p, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := SetRawEnabled(ctx, o, true); err != nil {
+		t.Fatal(err)
+	}
+	s, err := ReadRawConfig(o)
+	if err != nil || !s.Enabled {
+		t.Fatalf("not enabled: %#v %v", s, err)
+	}
+	if err := ClearRawConfig(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	s, err = ReadRawConfig(o)
+	if err != nil || s.Enabled || s.Installed {
+		t.Fatalf("not cleared: %#v %v", s, err)
 	}
 }
 
-func TestConfigArgsKeepManagedLayout(t *testing.T) {
-	managed := PrepareResult{Providers: "/r/providers.json", Outbounds: "/r/outbounds.json", EBPF: "/r/ebpf.json"}
-	args := managed.ConfigArgs("/m/config/singbox")
-	want := []string{
-		"-C", "/m/config/singbox/confdir",
-		"-c", "/r/providers.json", "-c", "/r/outbounds.json", "-c", "/r/ebpf.json",
+func TestRawScheduleUpdatesOnceThenWaits(t *testing.T) {
+	root := t.TempDir()
+	o := newTestOptions(root)
+	o.SingBoxPath = filepath.Join(root, "sing-box")
+	if err := os.WriteFile(o.SingBoxPath, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
 	}
-	if !slices.Equal(args, want) {
-		t.Fatalf("managed args = %v, want %v", args, want)
+	if err := os.MkdirAll(o.SingBoxDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++; _, _ = w.Write([]byte(`{"outbounds":[]}`)) }))
+	defer server.Close()
+	ctx := context.Background()
+	if err := SetRawConfigSource(ctx, o, server.URL, 3600, ""); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	next, err := RawSchedule(ctx, o, now)
+	if err != nil || calls != 1 || next <= now.Unix() {
+		t.Fatalf("first schedule: next=%d calls=%d err=%v", next, calls, err)
+	}
+	next2, err := RawSchedule(ctx, o, now.Add(time.Minute))
+	if err != nil || calls != 1 || next2 != next {
+		t.Fatalf("duplicate update: next=%d calls=%d err=%v", next2, calls, err)
 	}
 }

@@ -15,7 +15,6 @@ var (
 	querySecretPattern   = regexp.MustCompile(`(?i)([?&](?:token|key|secret|password|auth|uuid|hwid)=)[^&\s]+`)
 	authorizationPattern = regexp.MustCompile(`(?i)((?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic)\s+)[^\r\n\s,;，；。]+`)
 	lineSecretPattern    = regexp.MustCompile(`(?i)((?:["']?(?:x-hwid|hwid|uuid|token|password|secret|auth(?:[_-]?(?:str|key))?|p(?:re)?[_-]?shared[_-]?key|psk|private[_-]?key|public[_-]?key|short[_-]?id|custom[_-]?headers)["']?\s*[:=]\s*["']?))[^"'\r\n\s,;}，；。]+`)
-	privacyConfigPattern = regexp.MustCompile(`(?im)^(\s*(?:WIFI_SSID_LIST|PROXY_APPS_LIST|BYPASS_APPS_LIST)\s*=\s*).*$`)
 	httpURLPattern       = regexp.MustCompile(`(?i)\bhttps?://[^\s\p{Cc}<>"'，；。]+`)
 	otherURLPattern      = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s\p{Cc}<>"'，；。]+`)
 	sensitiveJSONKeys    = map[string]struct{}{
@@ -25,6 +24,7 @@ var (
 		"private_key_passphrase": {}, "private_key_path": {}, "proxy_authorization": {},
 		"psk": {}, "public_key": {}, "secret": {}, "short_id": {}, "token": {},
 		"url": {}, "user_agent": {}, "username": {}, "uuid": {},
+		"proxy_apps": {}, "bypass_apps": {}, "include_package": {}, "exclude_package": {},
 	}
 )
 
@@ -44,7 +44,6 @@ func RedactText(value string) string {
 	value = querySecretPattern.ReplaceAllString(value, `${1}***`)
 	value = authorizationPattern.ReplaceAllString(value, `${1}***`)
 	value = lineSecretPattern.ReplaceAllString(value, `${1}***`)
-	value = privacyConfigPattern.ReplaceAllString(value, `${1}"***"`)
 	value = httpURLPattern.ReplaceAllString(value, "[订阅链接已隐藏]")
 	value = otherURLPattern.ReplaceAllString(value, "[节点链接已隐藏]")
 	return value
@@ -65,6 +64,15 @@ func redactJSON(value any) {
 	case map[string]any:
 		for key, child := range item {
 			normalized := strings.ReplaceAll(strings.ToLower(key), "-", "_")
+			if normalized == "wifi" {
+				if policy, ok := child.(map[string]any); ok {
+					for _, name := range []string{"blacklist", "whitelist"} {
+						if _, exists := policy[name]; exists {
+							policy[name] = "***"
+						}
+					}
+				}
+			}
 			if _, sensitive := sensitiveJSONKeys[normalized]; sensitive {
 				item[key] = "***"
 				continue

@@ -21,6 +21,7 @@ jobs:
   update:
     name: 检查并更新资源、内核与依赖
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: 拉取代码
         uses: actions/checkout@v7
@@ -77,6 +78,7 @@ jobs:
           repository: ${{ steps.singbox_check.outputs.repo }}
           ref: ${{ steps.singbox_check.outputs.latest_version }}
           fetch-depth: 0
+          filter: blob:none
           persist-credentials: false
           path: .sing-box-source
 
@@ -132,7 +134,6 @@ jobs:
           file .sing-box-source/sing-box | grep -q 'ARM aarch64'
           go version -m .sing-box-source/sing-box | grep -q "${LATEST_VERSION#v}"
           go version -m .sing-box-source/sing-box | grep -q 'with_ebpf'
-          go version -m .sing-box-source/sing-box | grep -q 'with_gvisor'
           go version -m .sing-box-source/sing-box | grep -q 'with_tailscale'
 
           # 上游标签可能未提交重新生成后的 Schema，必须按同一源码与构建标签现场生成。
@@ -140,8 +141,7 @@ jobs:
             unset GOOS GOARCH CGO_ENABLED
             make -C .sing-box-source schema
           )
-          jq -e '."$defs".EBPFLocalOptions.properties.bypass_port' \
-            .sing-box-source/docs/schema.json >/dev/null
+          node .github/scripts/check-ebpf-schema.mjs .sing-box-source/docs/schema.json
 
           install -m 0755 .sing-box-source/sing-box "$SING_BOX_TARGET"
           install -m 0644 .sing-box-source/docs/schema.json \
@@ -352,80 +352,6 @@ jobs:
 
           jq . <<< "$report" > "$UPDATE_REPORT_DIR/rules.json"
 
-      - name: 更新 zashboard 仪表盘
-        id: zashboard
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          repo="$(jq -r '.githubRelease[0].repo' .github/resources.json)"
-          dest="$(jq -r '.githubRelease[0].path' .github/resources.json)"
-          pattern="$(jq -r '.githubRelease[0].assetPattern' .github/resources.json)"
-          current="$(jq -r '.githubRelease[0].currentVersion' .github/resources.json)"
-
-          release_json="$(gh release view --repo "$repo" --json tagName,name,publishedAt,url,body)"
-          latest="$(jq -r '.tagName' <<< "$release_json")"
-          echo "zashboard 当前: '${current:-无}'，最新: '$latest'"
-
-          if [ "$latest" != "$current" ]; then
-            echo "发现新版本，开始更新..."
-            rm -rf tmp-zashboard && mkdir -p tmp-zashboard
-            if gh release download "$latest" --repo "$repo" --pattern "$pattern" --dir tmp-zashboard; then
-              asset="$(find tmp-zashboard -maxdepth 1 -type f | head -n 1)"
-              asset_size="$(stat -c '%s' "$asset")"
-              asset_sha256="$(sha256sum "$asset" | cut -d ' ' -f 1)"
-              unzip -q tmp-zashboard/*.zip -d tmp-zashboard/extract
-              # 若解压出单个顶层目录（dist/ 或 dist-no-fonts/ 等），进入它；否则用解压根
-              srcdir="tmp-zashboard/extract"
-              inner="$(find "$srcdir" -mindepth 1 -maxdepth 1)"
-              if [ "$(printf '%s\n' "$inner" | grep -c .)" = "1" ] && [ -d "$inner" ]; then
-                srcdir="$inner"
-              fi
-              rm -rf "$dest"
-              mkdir -p "$dest"
-              cp -r "$srcdir"/. "$dest"/
-              # 回写当前版本到清单
-              tmpjson="$(mktemp)"
-              jq --arg v "$latest" '.githubRelease[0].currentVersion = $v' .github/resources.json > "$tmpjson"
-              mv "$tmpjson" .github/resources.json
-
-              jq -n \
-                --arg name "zashboard" \
-                --arg repo "$repo" \
-                --arg path "$dest" \
-                --arg currentVersion "$current" \
-                --arg latestVersion "$latest" \
-                --arg releaseName "$(jq -r '.name // empty' <<< "$release_json")" \
-                --arg publishedAt "$(jq -r '.publishedAt // empty' <<< "$release_json")" \
-                --arg releaseUrl "$(jq -r '.url // empty' <<< "$release_json")" \
-                --arg releaseNotes "$(jq -r '.body // empty' <<< "$release_json")" \
-                --arg assetPattern "$pattern" \
-                --arg assetSha256 "$asset_sha256" \
-                --argjson assetSize "$asset_size" \
-                '{
-                  name: $name,
-                  repo: $repo,
-                  path: $path,
-                  currentVersion: $currentVersion,
-                  latestVersion: $latestVersion,
-                  releaseName: $releaseName,
-                  publishedAt: $publishedAt,
-                  releaseUrl: $releaseUrl,
-                  releaseNotes: $releaseNotes,
-                  assetPattern: $assetPattern,
-                  assetSize: $assetSize,
-                  assetSha256: $assetSha256
-                }' > "$UPDATE_REPORT_DIR/zashboard.json"
-            else
-              echo "::warning::未找到资产 '$pattern'，跳过 zashboard 更新（请核对 assetPattern）"
-            fi
-            rm -rf tmp-zashboard
-          else
-            echo "已是最新，跳过"
-          fi
-
       - name: 更新 sing-box Dashboard
         id: singbox_dashboard
         env:
@@ -623,35 +549,11 @@ jobs:
             --report "$UPDATE_REPORT_DIR/android.json" \
             --output "$GITHUB_OUTPUT"
 
-      - name: 配置 Android 验证 JDK
-        if: steps.android.outputs.changed == 'true'
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 21
+      - name: 验证 Android 依赖与内核 Schema 更新
+        if: steps.android.outputs.changed == 'true' || steps.singbox_check.outputs.changed == 'true'
+        uses: ./.github/actions/verify-android
 
-      - name: 配置 Android 验证 Gradle
-        if: steps.android.outputs.changed == 'true'
-        uses: gradle/actions/setup-gradle@v5
-
-      - name: 配置 Android SDK
-        if: steps.android.outputs.changed == 'true'
-        uses: android-actions/setup-android@v4
-
-      - name: 安装 Android SDK 37
-        if: steps.android.outputs.changed == 'true'
-        shell: bash
-        run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0' --channel=1
-
-      - name: 验证 Android 依赖更新
-        if: steps.android.outputs.changed == 'true'
-        working-directory: src/android
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./gradlew testDebugUnitTest lintDebug --no-daemon
-
-      - name: 更新 GitHub Actions
+      - name: 检查 GitHub Actions 更新
         id: actions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -696,14 +598,7 @@ jobs:
               continue
             fi
 
-            echo "更新 ${action}: ${current} → ${latest_major}"
-            escaped_action="${action//./\.}"
-            grep -RlE \
-              --include='*.yml' \
-              --include='*.yaml' \
-              "${escaped_action}@${current}([^0-9]|$)" \
-              .github |
-              xargs -r sed -i -E "s#${escaped_action}@${current}([^0-9]|$)#${action}@${latest_major}\1#g"
+            echo "发现 ${action} 可升级: ${current} → ${latest_major}（待人工验证）"
 
             release_url="$(jq -r '.html_url // empty' <<< "$release_json")"
             if [ -z "$release_url" ]; then
@@ -718,6 +613,7 @@ jobs:
               --arg publishedAt "$(jq -r '.published_at // empty' <<< "$release_json")" \
               --arg releaseUrl "$release_url" \
               --arg repositoryUrl "https://github.com/${action}" \
+              --arg reason "工具链升级需人工验证" \
               '{
                 name: $name,
                 current: $current,
@@ -726,7 +622,8 @@ jobs:
                 releaseName: $releaseName,
                 publishedAt: $publishedAt,
                 releaseUrl: $releaseUrl,
-                repositoryUrl: $repositoryUrl
+                repositoryUrl: $repositoryUrl,
+                reason: $reason
               }')"
             report="$(jq --argjson entry "$entry" '. + [$entry]' <<< "$report")"
           done <<< "$specs"
@@ -734,26 +631,32 @@ jobs:
           jq . <<< "$report" > "$UPDATE_REPORT_DIR/actions.json"
 
       - name: 验证项目与更新脚本
+        env:
+          ANDROID_CHECKED: ${{ steps.android.outputs.changed == 'true' || steps.singbox_check.outputs.changed == 'true' }}
         run: |
           set -euo pipefail
 
-          npm ci --prefix docs --no-audit --no-fund
-          npm run build --prefix docs
-          npm ci --prefix src/webui --no-audit --no-fund
-          npm run build --prefix src/webui
+          checks='[]'
+          for project in docs src/webui; do
+            if ! git diff --quiet -- "$project"; then
+              npm ci --prefix "$project" --no-audit --no-fund
+              npm run build --prefix "$project"
+              checks="$(jq --arg check "$project 构建通过" '. + [$check]' <<< "$checks")"
+            else
+              echo "$project 无变更，跳过重复构建"
+            fi
+          done
           git diff --check
           node --check .github/scripts/render-update-report.mjs
           node --check .github/scripts/update-android-dependencies.mjs
           node --test .github/scripts/*.test.mjs
 
-          jq -n --arg android "${{ steps.android.outputs.changed }}" '
-            [
-              "文档站构建通过",
-              "WebUI 构建通过",
+          jq -n --argjson checks "$checks" --argjson android "$ANDROID_CHECKED" '
+            $checks + [
               "Git 差异检查通过",
               "依赖与 PR 报告脚本检查通过"
             ] + (
-              if $android == "true"
+              if $android
               then ["Android 单元测试与 Lint 通过（未构建或发布 APK）"]
               else []
               end
@@ -776,7 +679,7 @@ jobs:
       - name: 开启 / 更新 Pull Request
         uses: peter-evans/create-pull-request@v8
         with:
-          token: ${{ secrets.SYNC_PAT }}
+          token: ${{ secrets.RESOURCE_UPDATE_TOKEN }}
           branch: chore/update-resources
           delete-branch: true
           base: main

@@ -44,6 +44,13 @@ export const ANDROID_DEPENDENCIES = [
     source: moduleSource('org.jetbrains.kotlinx', 'kotlinx-serialization-json', ['central'], 'https://github.com/Kotlin/kotlinx.serialization/releases'),
   },
   {
+    id: 'okhttp',
+    name: 'OkHttp',
+    policy: 'auto-minor',
+    refs: [ref(MAIN_CATALOG, 'okhttp')],
+    source: moduleSource('com.squareup.okhttp3', 'okhttp', ['central'], 'https://github.com/lysine-dev/okhttp/releases'),
+  },
+  {
     id: 'activity-compose',
     name: 'AndroidX Activity Compose',
     policy: 'auto-minor',
@@ -63,13 +70,6 @@ export const ANDROID_DEPENDENCIES = [
     policy: 'auto-minor',
     refs: [ref(MAIN_CATALOG, 'lifecycleRuntimeKtx')],
     source: moduleSource('androidx.lifecycle', 'lifecycle-runtime-ktx', ['google'], 'https://developer.android.com/jetpack/androidx/releases/lifecycle'),
-  },
-  {
-    id: 'navigation3',
-    name: 'AndroidX Navigation3',
-    policy: 'auto-minor',
-    refs: [ref(MAIN_CATALOG, 'navigation3')],
-    source: moduleSource('androidx.navigation3', 'navigation3-runtime', ['google'], 'https://developer.android.com/jetpack/androidx/releases/navigation3'),
   },
   {
     id: 'navigation-event',
@@ -95,7 +95,7 @@ export const ANDROID_DEPENDENCIES = [
   {
     id: 'miuix',
     name: 'Miuix',
-    policy: 'auto-minor',
+    policy: 'manual',
     refs: [ref(MAIN_CATALOG, 'miuix')],
     source: moduleSource('top.yukonga.miuix.kmp', 'miuix-ui-android', ['central'], 'https://github.com/compose-miuix-ui/miuix/releases'),
   },

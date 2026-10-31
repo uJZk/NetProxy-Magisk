@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -16,14 +15,14 @@ const (
 	networkDebounceInterval   = time.Second
 	networkEventRetryInterval = 30 * time.Second
 	networkCommandTimeout     = 3 * time.Second
-	networkEvaluateTimeout    = 8 * time.Second
+	networkEvaluateTimeout    = 90 * time.Second
 	networkErrorRepeatEvery   = 100
 )
 
-var errNetworkUnavailable = errors.New("Android 网络尚未就绪")
+var ErrNetworkUnavailable = errors.New("Android 网络尚未就绪")
 
 func networkUnavailable(format string, args ...any) error {
-	return fmt.Errorf("%w: %s", errNetworkUnavailable, fmt.Sprintf(format, args...))
+	return fmt.Errorf("%w: %s", ErrNetworkUnavailable, fmt.Sprintf(format, args...))
 }
 
 type repeatedNetworkError struct {
@@ -50,11 +49,6 @@ func (state *repeatedNetworkError) recovered(logger *log.Logger) {
 	state.key = ""
 	state.count = 0
 }
-
-var (
-	connectedSSIDPattern = regexp.MustCompile(`(?i)wifi is connected to\s+(.+?)(?:,\s*bssid:|$)`)
-	infoSSIDPattern      = regexp.MustCompile(`(?i)(?:^|[\s,=:])ssid:\s*([^,\r\n]+)`)
-)
 
 // NetworkState 描述一次 Android 网络采集结果，也是 Worker 的网络变化指纹输入。
 type NetworkState struct {
@@ -89,7 +83,7 @@ type networkEvaluationResult struct {
 func runNetworkWatcher(ctx context.Context, options Options, logger *log.Logger) {
 	reader := options.NetworkStateReader
 	if reader == nil {
-		reader = getNetworkState
+		reader = ReadNetworkState
 	}
 	eventSource := options.NetworkEventSource
 	if eventSource == nil {
@@ -135,15 +129,13 @@ func runNetworkWatcher(ctx context.Context, options Options, logger *log.Logger)
 		previousState := lastEvaluatedState
 		havePreviousState := haveEvaluatedState
 		evaluationWait.Go(func() {
+			defer cancel()
 			results <- readAndEvaluateNetworkState(evaluationContext, options, reader, previousState, havePreviousState)
 		})
 	}
 
 	scheduleEvaluation := func(delay time.Duration) {
 		pending = false
-		if evaluationCancel != nil {
-			evaluationCancel()
-		}
 		stopNetworkTimer(debounceTimer)
 		debounceTimer = time.NewTimer(delay)
 		debounce = debounceTimer.C
@@ -200,7 +192,9 @@ func runNetworkWatcher(ctx context.Context, options Options, logger *log.Logger)
 }
 
 func runNetworkEventSource(ctx context.Context, source NetworkEventSource, notify func(), logger *log.Logger) {
+	retry := time.Second
 	for {
+		started := time.Now()
 		err := source(ctx, notify)
 		if ctx.Err() != nil {
 			return
@@ -210,12 +204,16 @@ func runNetworkEventSource(ctx context.Context, source NetworkEventSource, notif
 		} else {
 			logWorker(logger, "ERROR", "network.watch", "failed", "Android 网络事件监听意外结束")
 		}
-		timer := time.NewTimer(networkEventRetryInterval)
+		if time.Since(started) >= networkEventRetryInterval {
+			retry = time.Second
+		}
+		timer := time.NewTimer(retry)
 		select {
 		case <-ctx.Done():
 			stopNetworkTimer(timer)
 			return
 		case <-timer.C:
+			retry = min(retry*2, networkEventRetryInterval)
 		}
 	}
 }
@@ -241,7 +239,7 @@ func readAndEvaluateNetworkState(
 }
 
 func logNetworkReadFailure(logger *log.Logger, repeated *repeatedNetworkError, message string, err error) {
-	if errors.Is(err, errNetworkUnavailable) {
+	if errors.Is(err, ErrNetworkUnavailable) {
 		logWorker(logger, "INFO", "network.read", "waiting", "网络尚未就绪：等待 Android 默认路由")
 		return
 	}
@@ -249,7 +247,7 @@ func logNetworkReadFailure(logger *log.Logger, repeated *repeatedNetworkError, m
 }
 
 func readNetworkState(parent context.Context, reader NetworkStateReader) (NetworkState, error) {
-	ctx, cancel := context.WithTimeout(parent, networkEvaluateTimeout)
+	ctx, cancel := context.WithTimeout(parent, networkCommandTimeout)
 	defer cancel()
 	return reader(ctx)
 }
@@ -273,109 +271,48 @@ func evaluateNetworkState(parent context.Context, options Options, state Network
 	return options.NetworkEvaluate(ctx, state.NetworkType, state.SSID)
 }
 
-type networkCommandFunc func(context.Context, string, ...string) (string, error)
 type activeNetworkReader func(context.Context) (string, error)
 
-func getNetworkState(ctx context.Context) (NetworkState, error) {
-	return getNetworkStateWith(ctx, androidCommand, readActiveNetworkInterface)
+func ReadNetworkState(ctx context.Context) (NetworkState, error) {
+	return getNetworkStateWith(ctx, readWiFiNetwork, readActiveNetworkInterface)
 }
 
 func getNetworkStateWith(
 	ctx context.Context,
-	command networkCommandFunc,
+	readWiFi func(context.Context, string) (NetworkState, error),
 	readActiveInterface activeNetworkReader,
 ) (NetworkState, error) {
-	status, statusErr := command(ctx, "cmd", "wifi", "status")
-	dumpsys, dumpsysErr := command(ctx, "dumpsys", "wifi")
-	if statusErr != nil && dumpsysErr != nil {
-		return NetworkState{}, fmt.Errorf("cmd wifi status: %v; dumpsys wifi: %v", statusErr, dumpsysErr)
-	}
-	parts := make([]string, 0, 2)
-	if statusErr == nil {
-		parts = append(parts, status)
-	}
-	if dumpsysErr == nil {
-		parts = append(parts, dumpsys)
-	}
-	combined := strings.Join(parts, "\n")
-	networkType, ssid := parseWiFiSnapshot(combined)
-
 	activeInterface, err := readActiveInterface(ctx)
 	if err != nil {
 		return NetworkState{}, err
 	}
-	if networkType == "wifi" && !isWiFiInterface(activeInterface) {
-		// Android 仍可能报告 Wi-Fi 已连接，但 policy routing 已将真实出口切到蜂窝网络。
-		networkType = "not_wifi"
-		ssid = ""
+	if err := ctx.Err(); err != nil {
+		return NetworkState{}, err
+	}
+	state, err := readWiFi(ctx, activeInterface)
+	if err != nil {
+		return NetworkState{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return NetworkState{}, err
+	}
+	if state.NetworkType == "wifi" && state.SSID == "" {
+		return NetworkState{}, networkUnavailable("Wi-Fi 名称尚不可读")
 	}
 
-	return NetworkState{
-		NetworkType:     networkType,
-		SSID:            ssid,
-		ActiveInterface: activeInterface,
-	}, nil
-}
-
-func isWiFiInterface(iface string) bool {
-	lower := strings.ToLower(strings.TrimSpace(iface))
-	return strings.HasPrefix(lower, "wlan") ||
-		strings.HasPrefix(lower, "ap") ||
-		strings.HasPrefix(lower, "wifi")
+	state.ActiveInterface = activeInterface
+	return state, nil
 }
 
 func androidCommand(parent context.Context, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(parent, networkCommandTimeout)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, name, args...).Output()
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	if err != nil {
 		return "", err
 	}
 	return string(output), nil
-}
-
-func parseWiFiSnapshot(output string) (string, string) {
-	disabled := containsFold(output, "wifi is disabled")
-	connected := containsConnectedState(output)
-	ssid := ""
-
-	if match := connectedSSIDPattern.FindStringSubmatch(output); len(match) > 1 {
-		ssid = normalizeSSID(match[1])
-	}
-	if match := infoSSIDPattern.FindStringSubmatch(output); len(match) > 1 {
-		if value := normalizeSSID(match[1]); value != "" {
-			ssid = value
-			connected = true
-		}
-	}
-	if disabled {
-		return "not_wifi", ""
-	}
-	if connected {
-		return "wifi", ssid
-	}
-	return "not_wifi", ""
-}
-
-func containsConnectedState(output string) bool {
-	return containsFold(output, "wifi is connected to") ||
-		containsFold(output, "state: connected") ||
-		containsFold(output, "detailed state: connected")
-}
-
-func containsFold(value, target string) bool {
-	return strings.Contains(strings.ToLower(value), strings.ToLower(target))
-}
-
-func normalizeSSID(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
-		value = strings.TrimSpace(value[1 : len(value)-1])
-	}
-	switch strings.ToLower(value) {
-	case "", "<unknown ssid>", "<none>":
-		return ""
-	default:
-		return value
-	}
 }

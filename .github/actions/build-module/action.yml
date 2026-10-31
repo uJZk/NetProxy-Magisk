@@ -1,5 +1,13 @@
-name: 构建并打包模块
-description: 构建 WebUI、写入 versionCode，并打出标准包与含管理器包
+name: 构建模块内容
+description: 验证并构建原生组件与 WebUI，生成等待追加管理器的 XZ 模块内容
+
+inputs:
+  posthog-project-token:
+    description: 用于构建注入的 PostHog Project Token
+    required: true
+  posthog-host:
+    description: 用于构建注入的 PostHog ingestion host
+    required: true
 
 # 被 ci.yml 与 release.yml 复用的共享打包逻辑（调用前需已 checkout，且 fetch-depth: 0 以便统计提交数）
 outputs:
@@ -9,12 +17,9 @@ outputs:
   commit_count:
     description: 提交数，用作 versionCode
     value: ${{ steps.meta.outputs.commit_count }}
-  standard_name:
-    description: 标准包文件名
-    value: ${{ steps.meta.outputs.standard_name }}
-  manager_name:
-    description: 含管理器包文件名
-    value: ${{ steps.meta.outputs.manager_name }}
+  module_name:
+    description: 模块包文件名
+    value: ${{ steps.meta.outputs.module_name }}
 
 runs:
   using: composite
@@ -23,30 +28,18 @@ runs:
       uses: actions/setup-go@v7
       with:
         go-version-file: src/native/netproxy/go.mod
-        cache-dependency-path: src/native/netproxy/go.sum
+        cache: false
 
-    - name: 构建 NetProxy 原生组件
-      shell: bash
-      working-directory: src/native/netproxy
-      run: |
-        set -euo pipefail
-        go test ./...
-
-        output_cli="../../module/bin/netproxyctl"
-
-        CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -v \
-          -trimpath \
-          -buildvcs=false \
-          -pgo=auto \
-          -ldflags="-s -w -buildid=" \
-          -o "$output_cli" \
-          ./cmd/netproxyctl
-
-        test -s "$output_cli"
-        chmod 0755 "$output_cli"
-        file "$output_cli" | grep -q 'ARM aarch64'
-        go version -m "$output_cli" | grep -q 'github.com/reF1nd/sing-box'
-        go version -m "$output_cli" | grep -q -- '-pgo=default.pgo'
+    - name: 缓存 Go 依赖与编译结果
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+        key: ${{ runner.os }}-${{ runner.arch }}-native-${{ hashFiles('src/native/netproxy/go.sum') }}-${{ hashFiles('src/native/netproxy/**/*.pgo', 'tests/ci_verify.sh', '.github/actions/build-module/action.yml') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ runner.arch }}-native-${{ hashFiles('src/native/netproxy/go.sum') }}-
+          ${{ runner.os }}-${{ runner.arch }}-native-
 
     - name: 配置 Node
       uses: actions/setup-node@v7
@@ -55,35 +48,35 @@ runs:
         cache: npm
         cache-dependency-path: src/webui/package-lock.json
 
+    - name: 验证并构建 NetProxy 原生组件
+      shell: bash
+      env:
+        NETPROXY_CI_BUILD_DIR: ${{ runner.temp }}/netproxy-build
+        NETPROXY_TELEMETRY_REQUIRED: '1'
+        POSTHOG_PROJECT_TOKEN: ${{ inputs.posthog-project-token }}
+        POSTHOG_HOST: ${{ inputs.posthog-host }}
+      run: |
+        set -euo pipefail
+        sh tests/ci_verify.sh
+        install -m 0755 "$NETPROXY_CI_BUILD_DIR/netproxyctl-android" src/module/bin/netproxyctl
+
     - name: 构建 WebUI（产物 → src/module/webroot/netproxy）
       shell: bash
       working-directory: src/webui
       run: |
-        npm ci
+        npm ci --no-audit --no-fund
         npm run build
 
-    - name: 计算版本并写入 module.prop
+    - name: 计算构建元信息
       id: meta
       shell: bash
-      run: |
-        COMMIT_COUNT=$(git rev-list --count HEAD)
-        sed -i "s/^versionCode=.*/versionCode=$COMMIT_COUNT/" src/module/module.prop
-        VERSION=$(grep '^version=' src/module/module.prop | cut -d= -f2)
-        {
-          echo "version=$VERSION"
-          echo "commit_count=$COMMIT_COUNT"
-          echo "standard_name=NetProxy_${VERSION}_${COMMIT_COUNT}.zip"
-          echo "manager_name=NetProxy_${VERSION}_${COMMIT_COUNT}_with-manager.zip"
-        } >> "$GITHUB_OUTPUT"
+      run: sh .github/scripts/build-metadata.sh >> "$GITHUB_OUTPUT"
 
-    - name: 打包模块（标准 / 含管理器）
+    - name: 压缩模块内容（ZIP + XZ 9）
       shell: bash
-      working-directory: src/module
       env:
-        STANDARD_NAME: ${{ steps.meta.outputs.standard_name }}
-        MANAGER_NAME: ${{ steps.meta.outputs.manager_name }}
+        MODULE_NAME: ${{ steps.meta.outputs.module_name }}
+        COMMIT_COUNT: ${{ steps.meta.outputs.commit_count }}
       run: |
-        # 标准包不内置 Android 管理器，代理、CLI 和 Web 面板能力完整。
-        7z a -tzip -mx=9 "../../$STANDARD_NAME" . -x!"NetProxy.apk"
-        # 含管理器包只额外携带安装阶段可选安装的 Android APK。
-        7z a -tzip -mx=9 "../../$MANAGER_NAME" .
+        sed -i "s/^versionCode=.*/versionCode=$COMMIT_COUNT/" src/module/module.prop
+        sh .github/scripts/package-module.sh src/module "$GITHUB_WORKSPACE" "$MODULE_NAME"

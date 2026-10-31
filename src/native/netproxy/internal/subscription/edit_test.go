@@ -15,6 +15,49 @@ import (
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/provider"
 )
 
+func TestSettingsValidationRejectsInvalidPolicies(t *testing.T) {
+	for _, test := range []struct {
+		interval int64
+		via      string
+		timeout  int64
+		code     string
+	}{
+		{899, "auto", 60, "subscription.interval_too_short"},
+		{900, "invalid", 60, "subscription.proxy_mode_invalid"},
+		{900, "auto", 0, "subscription.timeout_invalid"},
+		{900, "auto", -1, "subscription.timeout_invalid"},
+	} {
+		err := ValidateSettings(test.interval, test.via, test.timeout)
+		structured, ok := errors.AsType[*Error](err)
+		if !ok || structured.Code != test.code {
+			t.Fatalf("校验结果不一致: %+v %v", test, err)
+		}
+	}
+	for _, via := range []string{"auto", "always", "never"} {
+		if err := ValidateSettings(900, via, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestInvalidSavedProxyPolicyNeverFallsBackToDirect(t *testing.T) {
+	root, groupID, groupDir, server := newEditableSubscription(t)
+	metadata, err := catalog.LoadMetadata(t.Context(), filepath.Join(groupDir, "meta.json"), groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.UpdateViaProxy = "invalid"
+	if err := catalog.SaveMetadataAtomic(t.Context(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+		t.Fatal(err)
+	}
+	server.Close()
+	_, err = Update(t.Context(), UpdateOptions{Root: root, GroupID: groupID, UseConfiguredProxy: true})
+	structured, ok := errors.AsType[*Error](err)
+	if !ok || structured.Code != "subscription.proxy_mode_invalid" {
+		t.Fatal("非法代理模式进入了下载流程", err)
+	}
+}
+
 func TestEditUpdatesSchedulingWithoutDownloading(t *testing.T) {
 	root := t.TempDir()
 	now := time.Unix(1_700_000_000, 0)
@@ -23,7 +66,7 @@ func TestEditUpdatesSchedulingWithoutDownloading(t *testing.T) {
 	metadata.UpdateInterval = 900
 	catalog.ScheduleAt(&metadata, now)
 	groupDir := filepath.Join(root, metadata.ID)
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatalf("save metadata: %v", err)
 	}
 
@@ -37,7 +80,7 @@ func TestEditUpdatesSchedulingWithoutDownloading(t *testing.T) {
 	if result.RequiresUpdate {
 		t.Fatal("auto update toggle unexpectedly downloaded subscription")
 	}
-	updated, err := catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), metadata.ID)
+	updated, err := catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), metadata.ID)
 	if err != nil {
 		t.Fatalf("load edited metadata: %v", err)
 	}
@@ -65,7 +108,7 @@ func TestEditKeepsMetadataAfterPersistedUpdateHistoryFailure(t *testing.T) {
 		t.Fatalf("unexpected history failure: %v", err)
 	}
 
-	metadata, err := catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +148,7 @@ func TestEditFilterChangeInvalidatesConditionalValidators(t *testing.T) {
 	metadata.LastModified = "Wed, 01 Nov 2023 00:00:00 GMT"
 	metadata.Timeout = 5
 	metadata.UpdateViaProxy = "never"
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	if err := provider.WriteAtomic(filepath.Join(groupDir, "provider.json"), []byte(`{"outbounds":[
@@ -155,7 +198,7 @@ func TestEditRestoresMetadataBeforeUpdateCommit(t *testing.T) {
 		t.Fatal("pre-commit failure was reported as success")
 	}
 
-	metadata, err := catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +244,7 @@ func TestEditDoesNotOverwriteConcurrentMetadataWriteDuringRestore(t *testing.T) 
 		t.Fatalf("concurrent Catalog write failed: %v", concurrentErr)
 	}
 
-	metadata, err := catalog.LoadMetadata(filepath.Join(groupDir, "meta.json"), groupID)
+	metadata, err := catalog.LoadMetadata(context.Background(), filepath.Join(groupDir, "meta.json"), groupID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +272,7 @@ func newEditableSubscription(t *testing.T) (root, groupID, groupDir string, serv
 	metadata := catalog.NewMetadata(groupID, "Original", "subscription", server.URL, time.Unix(1_700_000_000, 0))
 	metadata.Timeout = 5
 	metadata.UpdateViaProxy = "never"
-	if err := catalog.SaveMetadataAtomic(filepath.Join(groupDir, "meta.json"), metadata); err != nil {
+	if err := catalog.SaveMetadataAtomic(context.Background(), filepath.Join(groupDir, "meta.json"), metadata); err != nil {
 		t.Fatal(err)
 	}
 	if err := provider.WriteAtomic(filepath.Join(groupDir, "provider.json"), []byte(`{"outbounds":[{"type":"socks","tag":"old-node","server":"127.0.0.1","server_port":1080}]}`+"\n"), 0o600); err != nil {

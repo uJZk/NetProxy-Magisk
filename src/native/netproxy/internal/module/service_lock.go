@@ -1,6 +1,7 @@
 package module
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -17,6 +18,14 @@ type lifecycleLock struct {
 }
 
 func acquireLifecycleLock(stateFile string) (*lifecycleLock, error) {
+	return lockLifecycle(context.Background(), stateFile, false)
+}
+
+func waitLifecycleLock(ctx context.Context, stateFile string) (*lifecycleLock, error) {
+	return lockLifecycle(ctx, stateFile, true)
+}
+
+func lockLifecycle(ctx context.Context, stateFile string, wait bool) (*lifecycleLock, error) {
 	if strings.TrimSpace(stateFile) == "" {
 		return nil, errors.New("服务状态文件路径不能为空")
 	}
@@ -25,7 +34,13 @@ func acquireLifecycleLock(stateFile string) (*lifecycleLock, error) {
 		return nil, err
 	}
 	// OS 锁必须位于可回收的 PID 目录之外，否则崩溃清理会制造两个独立锁入口。
-	guard, err := processlock.TryAcquire(path + ".flock")
+	var guard *processlock.Lock
+	var err error
+	if wait {
+		guard, err = processlock.Acquire(ctx, path+".flock")
+	} else {
+		guard, err = processlock.TryAcquire(path + ".flock")
+	}
 	if errors.Is(err, processlock.ErrBusy) {
 		return nil, errors.New("已有服务操作正在执行")
 	}

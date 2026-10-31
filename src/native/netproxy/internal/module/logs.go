@@ -3,7 +3,11 @@ package module
 import (
 	"archive/tar"
 	"compress/gzip"
+	"encoding/json/jsontext"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,6 +23,10 @@ type archiveFile struct {
 	name   string
 	redact bool
 	tail   int64
+}
+
+type exportTarget struct {
+	info fs.FileInfo
 }
 
 // LogSnapshot 是 logs.show 对客户端返回的文本和结构化日志快照。
@@ -64,18 +72,7 @@ func ClearLog(options Options, kind string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return file.Close()
+	return logfile.Clear(path)
 }
 
 // ExportLogs 生成不包含节点凭据和订阅鉴权信息的诊断包。
@@ -83,38 +80,62 @@ func ExportLogs(options Options, destination string) error {
 	if strings.TrimSpace(destination) == "" {
 		return fmt.Errorf("诊断包路径不能为空")
 	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	target, err := inspectExportTarget(destination)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	if err := file.Chmod(0o600); err != nil {
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		return err
 	}
-	archive := gzip.NewWriter(file)
-	defer archive.Close()
+	file, err := os.CreateTemp(filepath.Dir(destination), ".diagnostics-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	archiveErr := ExportDiagnostics(options, file)
+	if err := errors.Join(archiveErr, file.Sync(), file.Close()); err != nil {
+		return err
+	}
+	if err := applyExportTargetMetadata(file.Name(), target); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), destination)
+}
+
+func inspectExportTarget(destination string) (exportTarget, error) {
+	info, err := os.Lstat(destination)
+	if errors.Is(err, os.ErrNotExist) {
+		return exportTarget{}, nil
+	}
+	if err != nil {
+		return exportTarget{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return exportTarget{}, fmt.Errorf("诊断包目标不是普通文件")
+	}
+	return exportTarget{info: info}, nil
+}
+
+// ExportDiagnostics 输出完整脱敏诊断包；调用方负责 output 的同步、关闭和完整传输。
+func ExportDiagnostics(options Options, output io.Writer) (err error) {
+	archive := gzip.NewWriter(output)
 	tarWriter := tar.NewWriter(archive)
-	defer tarWriter.Close()
+	defer func() { err = errors.Join(err, tarWriter.Close(), archive.Close()) }()
 	files := make([]archiveFile, 0)
 	for _, kind := range []string{"service", "core"} {
 		path, _ := LogFile(options, kind)
-		if kind == "service" {
-			for index := logfile.BackupCount; index >= 1; index-- {
-				backup := fmt.Sprintf("%s.%d", path, index)
-				files = append(files, archiveFile{source: backup, name: "logs/" + filepath.Base(backup), redact: true, tail: logfile.MaxFileBytes})
-			}
+		for index := logfile.BackupCount; index >= 1; index-- {
+			backup := fmt.Sprintf("%s.%d", path, index)
+			files = append(files, archiveFile{source: backup, name: "logs/" + filepath.Base(backup), redact: true, tail: logfile.MaxFileBytes})
 		}
 		files = append(files, archiveFile{source: path, name: "logs/" + filepath.Base(path), redact: true, tail: logfile.MaxFileBytes})
 	}
 	files = append(files,
-		archiveFile{source: options.ModuleConfig, name: "config/module.conf", redact: true},
-		archiveFile{source: options.EBPFConfig, name: "config/ebpf.conf", redact: true},
+		archiveFile{source: options.ModuleConfig, name: "config/module.json", redact: true},
+		archiveFile{source: options.InboundConfig, name: "config/inbound.json", redact: true},
+		archiveFile{source: paths.SingBoxConfig(options.SingBoxDir), name: "config/singbox/config.json", redact: true},
 	)
 	for _, directory := range []struct{ path, name string }{
-		{paths.SingBoxConfDir(options.SingBoxDir), "config/singbox/confdir"},
 		{paths.SingBoxLocalRulesDir(options.SingBoxDir), "config/singbox/rules/local"},
 	} {
 		appendDirectoryFiles(&files, directory.path, directory.name, true, false)
@@ -124,7 +145,7 @@ func ExportLogs(options Options, destination string) error {
 		"config/singbox/rules/remote", false, false,
 	)
 	appendDirectoryFiles(&files, options.CatalogRoot, "data/catalog", true, true)
-	for _, name := range []string{"providers.json", "outbounds.json", "ebpf.json"} {
+	for _, name := range []string{"providers.json", "outbounds.json", "inbound.json"} {
 		files = append(files, archiveFile{
 			source: filepath.Join(options.RuntimeDir, name),
 			name:   "runtime/" + name,
@@ -150,6 +171,10 @@ func ExportLogs(options Options, destination string) error {
 			return err
 		}
 		if item.redact {
+			// 损坏的 JSON 无法按字段脱敏，不能把残留的名单或凭据作为诊断原文导出。
+			if filepath.Ext(item.name) == ".json" && !jsontext.Value(content).IsValid() {
+				content = []byte("{\"diagnostic_error\":\"JSON 配置损坏，已省略原文以保护敏感信息\"}\n")
+			}
 			content = []byte(logfile.RedactText(string(content)))
 		}
 		if err := writeTarFile(tarWriter, item.name, content); err != nil {

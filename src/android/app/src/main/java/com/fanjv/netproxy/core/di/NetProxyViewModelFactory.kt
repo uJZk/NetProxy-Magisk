@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.fanjv.netproxy.NetProxyApplication
+import com.fanjv.netproxy.core.module.ModuleAccessViewModel
 import com.fanjv.netproxy.feature.apps.presentation.AppsViewModel
 import com.fanjv.netproxy.feature.catalog.presentation.nodes.CatalogNodesViewModel
 import com.fanjv.netproxy.feature.catalog.presentation.subscriptions.SubscriptionDetailsViewModel
@@ -15,7 +16,9 @@ import com.fanjv.netproxy.feature.catalog.presentation.subscriptions.Subscriptio
 import com.fanjv.netproxy.feature.dashboard.presentation.CatalogDashboardViewModel
 import com.fanjv.netproxy.feature.kernel.presentation.SingBoxConfigViewModel
 import com.fanjv.netproxy.feature.logs.presentation.LogsViewModel
+import com.fanjv.netproxy.feature.inbound.presentation.InboundViewModel
 import com.fanjv.netproxy.feature.settings.presentation.SettingsViewModel
+import com.fanjv.netproxy.feature.routing.presentation.RoutingRulesViewModel
 import com.fanjv.netproxy.feature.theme.presentation.ThemeViewModel
 
 /** 在应用组合根集中创建 ViewModel，业务类不再依赖 Application 或服务定位器。 */
@@ -25,9 +28,10 @@ internal class NetProxyViewModelFactory(
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T =
         when (modelClass) {
+            ModuleAccessViewModel::class.java -> ModuleAccessViewModel(container.moduleEnvironment)
             CatalogDashboardViewModel::class.java -> CatalogDashboardViewModel(
                 container.serviceRepository,
-                container.moduleEnvironment
+                container.moduleEnvironment.totalMemoryBytes
             )
 
             CatalogNodesViewModel::class.java -> CatalogNodesViewModel(
@@ -49,17 +53,24 @@ internal class NetProxyViewModelFactory(
 
             AppsViewModel::class.java -> AppsViewModel(
                 container.appPolicyRepository,
-                container.appPackageRepository
+                container.appPackageRepository,
+                writes = container.configurationWrites
             )
 
             SettingsViewModel::class.java -> SettingsViewModel(
                 container.configRepository,
-                container.serviceRepository
+                writes = container.configurationWrites
             )
+
+            InboundViewModel::class.java -> InboundViewModel(container.inboundRepository,
+                writes = container.configurationWrites)
+
+            RoutingRulesViewModel::class.java -> RoutingRulesViewModel(container.configRepository)
 
             SingBoxConfigViewModel::class.java -> SingBoxConfigViewModel(
                 container.configRepository,
-                container.serviceRepository
+                container.serviceRepository,
+                container.inboundRepository
             )
 
             LogsViewModel::class.java -> LogsViewModel(container.logRepository)
@@ -68,7 +79,7 @@ internal class NetProxyViewModelFactory(
         } as T
 }
 
-/** 使用当前 Navigation3 条目的 ViewModelStore 获取已注入依赖的 ViewModel。 */
+/** 使用当前 Miuix Nav 条目的 ViewModelStore 获取已注入依赖的 ViewModel。 */
 @Composable
 internal inline fun <reified T : ViewModel> netProxyViewModel(): T {
     val application = LocalContext.current.applicationContext as NetProxyApplication

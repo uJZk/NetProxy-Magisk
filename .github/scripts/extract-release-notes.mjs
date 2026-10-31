@@ -1,15 +1,14 @@
 import { readFile, writeFile } from "node:fs/promises"
+import { pathToFileURL } from "node:url"
 
-// 第四段用于 fork 的补丁版本（如 8.1.1.1）：上游三段版本加一位，
-// 表示同一上游版本之上的第 N 次本仓库发布。
-const versionPattern = String.raw`\d+\.\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.-]+)?`
+const versionPattern = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?`
 const releaseHeadingPatterns = [
   new RegExp(`^##\\s+版本\\s*v?(${versionPattern})(?=\\s|[（(]|$)`, "u"),
   new RegExp(`^##\\s+v(${versionPattern})(?=\\s|[（(]|$)`, "u"),
   new RegExp(`^##\\s+🎉\\s+v?(${versionPattern})(?=\\s|[（(]|$)`, "u"),
 ]
 
-function normalizeVersion(value) {
+export function normalizeVersion(value) {
   const match = value.trim().match(new RegExp(`^v?(${versionPattern})$`, "u"))
   if (!match) {
     throw new Error(`无效版本号: ${value}`)
@@ -27,7 +26,7 @@ function releaseVersion(line) {
   return null
 }
 
-function extractReleaseNotes(markdown, rawVersion) {
+export function extractReleaseNotes(markdown, rawVersion) {
   const version = normalizeVersion(rawVersion)
   const lines = markdown.replaceAll("\r\n", "\n").split("\n")
   const matchingHeadings = []
@@ -55,7 +54,7 @@ function extractReleaseNotes(markdown, rawVersion) {
   }
 
   const notes = lines.slice(start, end).join("\n").trim()
-  if (notes.length === 0) {
+  if (lines.slice(start + 1, end).join("\n").trim().length === 0) {
     throw new Error(`版本 ${version} 的更新日志为空`)
   }
   return `${notes}\n`
@@ -72,7 +71,9 @@ async function main() {
   await writeFile(outputPath, notes, "utf8")
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error))
-  process.exitCode = 1
-})
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exitCode = 1
+  })
+}

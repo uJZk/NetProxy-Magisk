@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -21,6 +22,7 @@ const (
 	methodGetStartedAt        = "/daemon.StartedService/GetStartedAt"
 	methodSubscribeStatus     = "/daemon.StartedService/SubscribeStatus"
 	methodGetClashModeStatus  = "/daemon.StartedService/GetClashModeStatus"
+	methodSubscribeClashMode  = "/daemon.StartedService/SubscribeClashMode"
 	methodSetClashMode        = "/daemon.StartedService/SetClashMode"
 	methodSelectOutbound      = "/daemon.StartedService/SelectOutbound"
 	methodURLTest             = "/daemon.StartedService/URLTest"
@@ -36,6 +38,16 @@ type Client struct {
 	baseURL    string
 	secret     string
 	httpClient *http.Client
+}
+
+type retryableError struct{ error }
+
+// IsRetryable 只识别临时通信和服务错误，不重试鉴权、选择目标或协议错误。
+func IsRetryable(err error) bool {
+	_, apiError := errors.AsType[*retryableError](err)
+	_, networkError := errors.AsType[*net.OpError](err)
+	return !errors.Is(err, context.Canceled) && (apiError || networkError || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF))
 }
 
 type StartedAt struct {
@@ -198,6 +210,21 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return Status(response), nil
 }
 
+// SubscribeStatus 同步消费每个完整快照；完整帧后 EOF 或成功 trailer 返回 nil，由调用方重连。
+// consume 返回前不读取下一帧；取消会关闭响应体，但不能中断正在执行的 consume。
+func (c *Client) SubscribeStatus(ctx context.Context, interval time.Duration, consume func(Status) error) error {
+	if consume == nil {
+		return errors.New("Service API status consumer is nil")
+	}
+	return c.subscribe(ctx, methodSubscribeStatus, &statusRequest{Interval: int64(interval)}, func(content []byte) error {
+		var response statusResponse
+		if err := (wireCodec{}).Unmarshal(content, &response); err != nil {
+			return err
+		}
+		return consume(Status(response))
+	})
+}
+
 func (c *Client) Mode(ctx context.Context) (Mode, error) {
 	var response modeStatusResponse
 	if err := c.invoke(ctx, methodGetClashModeStatus, &emptyMessage{}, &response); err != nil {
@@ -206,12 +233,44 @@ func (c *Client) Mode(ctx context.Context) (Mode, error) {
 	return Mode(response), nil
 }
 
+// SubscribeClashMode 消费原生模式变更流，与状态流共用取消、背压和帧校验。
+func (c *Client) SubscribeClashMode(ctx context.Context, consume func(string) error) error {
+	if consume == nil {
+		return errors.New("Service API clash mode consumer is nil")
+	}
+	return c.subscribe(ctx, methodSubscribeClashMode, &emptyMessage{}, func(content []byte) error {
+		var mode string
+		// ClashMode 的 mode 是字段 3，不是 ClashModeStatus 的 current_mode 字段 2。
+		err := consumeFields(content, func(number protowire.Number, wireType protowire.Type, field []byte) (int, error) {
+			if number != 3 {
+				return 0, nil
+			}
+			value, length, err := consumeString(field, wireType)
+			mode = value
+			return length, err
+		})
+		if err != nil {
+			return err
+		}
+		return consume(mode)
+	})
+}
+
 func (c *Client) SetMode(ctx context.Context, mode string) error {
 	return c.invoke(ctx, methodSetClashMode, &modeRequest{Mode: mode}, &emptyMessage{})
 }
 
 func (c *Client) Select(ctx context.Context, group string, outbound string) error {
 	return c.invoke(ctx, methodSelectOutbound, &selectOutboundRequest{Group: group, Outbound: outbound}, &emptyMessage{})
+}
+
+func (c *Client) SelectGroup(ctx context.Context, group, node string) error {
+	if node != "" {
+		if err := c.Select(ctx, group, node); err != nil {
+			return err
+		}
+	}
+	return c.Select(ctx, "Proxy", group)
 }
 
 func (c *Client) URLTest(ctx context.Context, outbound string) error {
@@ -238,6 +297,20 @@ func (c *Client) Groups(ctx context.Context) ([]Group, error) {
 	return response.Groups, nil
 }
 
+// SubscribeGroups 同步消费独立的分组快照，结束、背压和取消语义与 SubscribeStatus 相同。
+func (c *Client) SubscribeGroups(ctx context.Context, consume func([]Group) error) error {
+	if consume == nil {
+		return errors.New("Service API groups consumer is nil")
+	}
+	return c.subscribe(ctx, methodSubscribeGroups, &emptyMessage{}, func(content []byte) error {
+		var response groupsResponse
+		if err := (wireCodec{}).Unmarshal(content, &response); err != nil {
+			return err
+		}
+		return consume(response.Groups)
+	})
+}
+
 // Outbounds 返回当前 sing-box 实例注册的出站与端点快照。
 func (c *Client) Outbounds(ctx context.Context) ([]GroupItem, error) {
 	payload, err := (wireCodec{}).Marshal(&emptyMessage{})
@@ -258,16 +331,40 @@ func (c *Client) Outbounds(ctx context.Context) ([]GroupItem, error) {
 const maxFrameSize = 32 << 20
 
 func (c *Client) doRequest(ctx context.Context, method string, payload []byte, firstDataFrameOnly bool) ([]byte, error) {
+	var firstData []byte
+	err := c.readResponse(ctx, method, payload, func(content []byte) (bool, error) {
+		if firstData == nil {
+			firstData = content
+		}
+		return firstDataFrameOnly, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return firstData, nil
+}
+
+func (c *Client) subscribe(ctx context.Context, method string, request any, consume func([]byte) error) error {
+	payload, err := (wireCodec{}).Marshal(request)
+	if err != nil {
+		return err
+	}
+	return c.readResponse(ctx, method, payload, func(content []byte) (bool, error) {
+		return false, consume(content)
+	})
+}
+
+func (c *Client) readResponse(ctx context.Context, method string, payload []byte, consume func([]byte) (bool, error)) error {
 	var requestBody bytes.Buffer
 	requestBody.WriteByte(0)
 	if err := binary.Write(&requestBody, binary.BigEndian, uint32(len(payload))); err != nil {
-		return nil, err
+		return err
 	}
 	requestBody.Write(payload)
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+method, &requestBody)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	request.Header.Set("Content-Type", "application/grpc-web+proto")
 	request.Header.Set("Accept", "application/grpc-web+proto")
@@ -278,52 +375,79 @@ func (c *Client) doRequest(ctx context.Context, method string, payload []byte, f
 	}
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer response.Body.Close()
+	stopClose := context.AfterFunc(ctx, func() { _ = response.Body.Close() })
+	defer stopClose()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return nil, fmt.Errorf("Service API HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		err := fmt.Errorf("Service API HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		switch response.StatusCode {
+		case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError,
+			http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return &retryableError{err}
+		}
+		return err
 	}
 
-	var firstData []byte
+	receivedData := false
 	for {
-		var header [5]byte
-		if _, err = io.ReadFull(response.Body, header[:]); err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				// reF1nd 的部分 unary RPC 只发送完整数据帧，不附带 trailer。
-				// 数据帧已经完整读取时可以安全解码；明确的 gRPC 错误帧仍在上方处理。
-				if firstData != nil {
-					return firstData, nil
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		content, trailer, readErr := readFrame(response.Body)
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				// reF1nd 的无 trailer 兼容只接受帧边界 EOF，不能接受截断的后续帧。
+				if receivedData {
+					return nil
 				}
-				return nil, errors.New("Service API response ended without gRPC status")
+				return errors.New("Service API response ended without gRPC status")
 			}
-			return nil, err
+			return readErr
 		}
-		length := binary.BigEndian.Uint32(header[1:])
-		if length > maxFrameSize {
-			return nil, fmt.Errorf("Service API frame is too large: %d", length)
+		if trailer {
+			return nil
 		}
-		content := make([]byte, length)
-		if _, err = io.ReadFull(response.Body, content); err != nil {
-			return nil, err
-		}
-		if header[0]&0x80 != 0 {
-			if err = parseTrailer(content); err != nil {
-				return nil, err
-			}
-			return firstData, nil
-		}
-		if header[0] != 0 {
-			return nil, fmt.Errorf("unsupported Service API frame flag: 0x%02x", header[0])
-		}
-		if firstData == nil {
-			firstData = content
-			if firstDataFrameOnly {
-				return firstData, nil
-			}
+		receivedData = true
+		stop, err := consume(content)
+		if err != nil || stop {
+			return err
 		}
 	}
+}
+
+func readFrame(reader io.Reader) ([]byte, bool, error) {
+	var header [5]byte
+	if n, err := io.ReadFull(reader, header[:]); err != nil {
+		if n > 0 && errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+		return nil, false, err
+	}
+	length := binary.BigEndian.Uint32(header[1:])
+	if length > maxFrameSize {
+		return nil, false, fmt.Errorf("Service API frame is too large: %d", length)
+	}
+	content := make([]byte, length)
+	if _, err := io.ReadFull(reader, content); err != nil {
+		// 已读到帧头时，即使正文一个字节都没有，也不是正常的帧边界 EOF。
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+		return nil, false, err
+	}
+	if header[0]&0x80 != 0 {
+		return nil, true, parseTrailer(content)
+	}
+	if header[0] != 0 {
+		return nil, false, fmt.Errorf("unsupported Service API frame flag: 0x%02x", header[0])
+	}
+	return content, false, nil
 }
 
 func parseTrailer(content []byte) error {
@@ -336,7 +460,11 @@ func parseTrailer(content []byte) error {
 		}
 		switch strings.ToLower(strings.TrimSpace(key)) {
 		case "grpc-status":
-			statusCode, _ = strconv.Atoi(strings.TrimSpace(value))
+			var err error
+			statusCode, err = strconv.Atoi(strings.TrimSpace(value))
+			if err != nil {
+				return fmt.Errorf("invalid Service API grpc-status: %q", value)
+			}
 		case "grpc-message":
 			statusMessage, _ = url.PathUnescape(strings.TrimSpace(value))
 		}
@@ -348,7 +476,12 @@ func parseTrailer(content []byte) error {
 		if statusMessage == "" {
 			statusMessage = "unknown error"
 		}
-		return fmt.Errorf("gRPC status %d: %s", statusCode, statusMessage)
+		err := fmt.Errorf("gRPC status %d: %s", statusCode, statusMessage)
+		switch statusCode {
+		case 4, 8, 10, 14: // DeadlineExceeded、ResourceExhausted、Aborted、Unavailable。
+			return &retryableError{err}
+		}
+		return err
 	}
 	return nil
 }

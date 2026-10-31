@@ -5,6 +5,20 @@ interface CommandSpec {
 }
 
 export const COMMANDS = {
+  api: {
+    overview: 'api <命令>      模块 HTTP 管理接口',
+    actions: ['init', 'start', 'status', 'access'],
+    help: `api - 模块 HTTP 管理接口
+
+  api init      初始化独立随机凭据，不覆盖已有配置
+  api start     启动或恢复后台管理接口
+  api status    查看实际接口就绪状态
+  api access    读取地址与凭据，仅供 Root 客户端连接
+
+接口默认仅监听 127.0.0.1:9091，关闭 sing-box 不关闭管理接口。
+凭据不可分享或粘贴到公共聊天中。
+`,
+  },
   service: {
     overview: 'service <命令>  服务控制',
     actions: ['status', 'start', 'stop', 'restart', 'reload', 'check', 'toggle'],
@@ -19,6 +33,7 @@ export const COMMANDS = {
   service toggle      切换服务状态
 
 状态: stopped / preparing / starting / ready / stopping / failed
+configured_backend 是保存的入站；active_backend 仅在 ready 且 PID/API 毫秒启动身份一致时非空，否则为 null。
 `,
   },
   catalog: {
@@ -70,22 +85,25 @@ export const COMMANDS = {
   },
   mode: {
     overview: 'mode <模式>     出站模式',
-    actions: ['rule', 'global', 'direct', 'AllowAds'],
+    actions: [],
     help: `mode - 出站模式
 
-  mode rule       规则分流
-  mode global     全局代理
-  mode direct     全局直连
-  mode AllowAds   允许广告规则
+  mode            查看默认模式、实际模式与可选模式
+  mode <模式名称> 保存主配置默认模式，运行时应用网络策略
+
+可选模式来自主配置的路由与 DNS 规则，名称与内核一致。
+默认配置：Rule（规则）、Proxy（代理）、Direct（直连）、RuleAllowAds（规则，允许广告）。
+示例：mode Proxy、mode RuleAllowAds。
 `,
   },
   network: {
     overview: 'network <命令>  网络策略评估',
-    actions: ['evaluate'],
+    actions: ['evaluate', 'wifi-list'],
     help: `network - 网络策略
 
   network evaluate --type <类型> [--ssid <名称>]
                          评估当前网络并应用 Wi-Fi 策略
+  network wifi-list       查看已保存的 Wi-Fi 名称
   类型: wifi / not_wifi
 `,
   },
@@ -101,6 +119,8 @@ export const COMMANDS = {
   app remove <用户ID>:<包名>   移除指定用户的应用
   app enable                  启用分应用代理
   app disable                 禁用分应用代理
+
+共用名单保存在 inbound.json 的 app 对象，运行时修改自动应用；只筛选本机应用。
 `,
   },
   ebpf: {
@@ -114,6 +134,8 @@ export const COMMANDS = {
   ebpf status local                   检查本机数据路径
   ebpf status shared                  检查共享网络数据路径
   ebpf status all --raw               输出原始诊断信息
+
+只诊断 eBPF 能力，不代表实际 active_backend；TUN 通过配置检查、实际启动与日志确认。
 `,
   },
   config: {
@@ -126,6 +148,18 @@ export const COMMANDS = {
   config check                        检查全部配置
   config validate <目标> <内容文件>   校验配置
   config apply <目标> <内容文件>      应用配置
+
+  完整配置：module（module.json）、singbox/config.json、inbound
+  模块分区：module/wifi、module/auto_start
+  模块分区保留顶层字段，例如 {"auto_start":true}、{"wifi":{...}}；不能用 {} 删除。
+  模块分区 revision 独立，保存时保留 selection 和其他字段；auto_start 只影响下次开机。
+  入站分区：inbound/backend、inbound/root_policy、inbound/app、inbound/ebpf、inbound/tun
+  入站分区保留顶层字段，例如 {"backend":"tun"}；不能用 {} 删除。
+  核心分区：singbox/dns、singbox/inbounds、singbox/route 等
+  核心分区保留顶层字段，例如 {"dns":{...}}；{} 删除该分区。
+  只读运行时：runtime/inbound.json、runtime/providers.json、runtime/outbounds.json
+  apply/validate 在目标前加 --revision <读取值>，避免覆盖并发修改。
+  切换强杀或清理未确认时中止并保留 journal，需要设备重启后再恢复。
 `,
   },
   logs: {
@@ -145,6 +179,12 @@ export type CommandName = keyof typeof COMMANDS
 export const COMMAND_NAMES = Object.keys(COMMANDS) as CommandName[]
 export const ROOT_COMPLETIONS = [...COMMAND_NAMES, 'help', 'clear', 'exit']
 export const HELP_TOPICS = [...COMMAND_NAMES, 'shell']
+const CONFIG_TARGETS = [
+  'module', 'module/wifi', 'module/auto_start',
+  'inbound', 'inbound/backend', 'inbound/root_policy', 'inbound/app', 'inbound/ebpf', 'inbound/tun', 'singbox/config.json',
+  'singbox/log', 'singbox/dns', 'singbox/inbounds', 'singbox/outbounds', 'singbox/route',
+  'singbox/experimental', 'singbox/http_clients', 'singbox/services',
+]
 
 export const VALUE_COMPLETIONS: Record<string, string[]> = {
   'app mode': ['blacklist', 'whitelist'],
@@ -153,4 +193,7 @@ export const VALUE_COMPLETIONS: Record<string, string[]> = {
   'logs clear': ['service', 'core'],
   'network evaluate': ['--type', '--ssid'],
   'network evaluate --type': ['wifi', 'not_wifi'],
+  'config read': [...CONFIG_TARGETS, 'runtime/inbound.json', 'runtime/providers.json', 'runtime/outbounds.json'],
+  'config apply': CONFIG_TARGETS,
+  'config validate': CONFIG_TARGETS,
 }
