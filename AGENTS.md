@@ -6,6 +6,8 @@
 
 本文件只收录「违反后编译和测试都不报错、但运行时会静默出错」的约束。能被 `go vet`、`tsc`、Gradle lint 或现有测试拦住的规则不写在这里。
 
+完整配置直通的实现、验证及待办见 [维护记录](docs/maintenance/passthrough.md)。
+
 ## 项目边界
 
 - `src/module/`：Magisk、KernelSU 与 APatch 模块，包含生命周期脚本、`netproxyctl`、sing-box 配置、资源和打包内容。

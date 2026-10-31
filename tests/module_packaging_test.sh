@@ -107,12 +107,12 @@ assert_contains "$RELEASE_WORKFLOW" 'needs: [preflight, build]'
 assert_contains "$RELEASE_WORKFLOW" 'release-preflight.mjs'
 assert_contains "$RELEASE_WORKFLOW" '发布工作流只能从已有的 v<版本号> tag 运行。'
 assert_contains "$RELEASE_WORKFLOW" 'update.json'
+assert_contains "$ROOT/src/module/module.prop" 'updateJson=https://github.com/uJZk/NetProxy-Magisk/releases/latest/download/update.json'
+assert_contains "$RELEASE_WORKFLOW" 'REPO: ${{ github.repository }}'
 assert_contains "$RELEASE_WORKFLOW" 'releases/download/${TAG}/${MODULE_NAME}'
 assert_contains "$RELEASE_WORKFLOW" 'extract-release-notes.mjs'
 assert_contains "$RELEASE_WORKFLOW" 'body_path: ${{ runner.temp }}/release-notes.md'
-assert_contains "$RELEASE_WORKFLOW" '[模块包]'
-assert_contains "$RELEASE_WORKFLOW" 'dry-run: true'
-assert_contains "$RELEASE_WORKFLOW" 'uses: ./.github/workflows/publish-kernelsu.yml'
+assert_not_contains "$RELEASE_WORKFLOW" 'TG_BOT_TOKEN|DIST_REPO_TOKEN|publish-kernelsu.yml'
 assert_not_contains "$RELEASE_WORKFLOW" 'sync-kernelsu|actions: write'
 [ ! -e "$ROOT/module.json" ]
 [ ! -e "$ROOT/.github/workflows/sync-kernelsu.yml" ]
@@ -135,12 +135,7 @@ assert_contains "$SHARED_WORKFLOW" 'compression-level: 0'
 assert_contains "$SHARED_WORKFLOW" '            src/module/config/singbox'
 assert_contains "$CI_WORKFLOW" '--target "$GITHUB_SHA"'
 assert_contains "$CI_WORKFLOW" 'COMMIT_MESSAGE=$(git log -1 --format=%s "$GITHUB_SHA")'
-assert_contains "$CI_WORKFLOW" 'parse-mode: ""'
-sed -n '/      - name: Telegram 构建成功通知/,/        with:/p' "$CI_WORKFLOW" |
-  grep -Fq 'continue-on-error: true' || {
-    printf '%s\n' 'Telegram 通知失败不得改变已成功的构建与发布结果' >&2
-    exit 1
-  }
+assert_not_contains "$CI_WORKFLOW" 'TG_BOT_TOKEN|TG_CHAT_ID'
 if sed -n '/      - name: 发布 Pre-release 到 GitHub Release/,/      - name: Telegram 构建成功通知/p' "$CI_WORKFLOW" |
     grep -Fq 'continue-on-error:'; then
   printf '%s\n' '开发包发布失败必须阻止 CI 成功' >&2

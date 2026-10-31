@@ -101,17 +101,15 @@ test('下载内容被替换时停止，不能继续分发', async (t) => {
   }), /摘要不一致/)
 })
 
-test('正式发布先预检再发布，独立重试不构建，nightly 不分发', () => {
+test('本仓库发布不自动分发，独立分发工作流不构建，nightly 不分发', () => {
   const main = readFileSync(new URL('../workflows/release.yml', import.meta.url), 'utf8')
   const retry = readFileSync(new URL('../workflows/publish-kernelsu.yml', import.meta.url), 'utf8')
   const nightly = readFileSync(new URL('../workflows/ci.yml', import.meta.url), 'utf8')
-  assert.ok(main.indexOf('name: KernelSU 分发预检') < main.indexOf('name: 发布 GitHub Release'))
-  assert.match(main, /needs: release\s+uses: \.\/\.github\/workflows\/publish-kernelsu.yml/)
-  assert.match(main, /主仓库.*已发布，KernelSU 分发失败/)
+  assert.doesNotMatch(main, /publish-kernelsu|module-release@|DIST_REPO_TOKEN/)
   assert.match(retry, /default: true/)
   assert.match(retry, /ref: \$\{\{ inputs.tag }}/)
   assert.doesNotMatch(retry, /build-module|softprops|telegram|git push/)
   assert.doesNotMatch(nightly, /uses:.*publish-kernelsu|module-release@/)
   const pin = 'ca1187c92135b3c31e48d37e008d61153120a08b'
-  assert.ok(main.includes(`module-release@${pin}`) && retry.includes(`module-release@${pin}`))
+  assert.ok(retry.includes(`module-release@${pin}`))
 })
