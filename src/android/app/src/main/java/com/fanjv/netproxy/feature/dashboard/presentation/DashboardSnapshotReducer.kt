@@ -44,14 +44,13 @@ internal class DashboardSnapshotReducer(
 
         return current.copy(
             loading = false,
+            serviceStatusKnown = true,
             serviceState = service.state,
             serviceError = service.error,
             readyAt = displayedReadyAt,
             uptimeSeconds = displayedUptime,
             outboundMode = service.outboundMode,
             availableOutboundModes = service.availableOutboundModes.toList(),
-            activeGroupId = service.activeGroupId,
-            currentNode = dashboardNodeName(service),
             downloadTotal = traffic.first,
             uploadTotal = traffic.second,
             cpuUsage = cpuUsage,

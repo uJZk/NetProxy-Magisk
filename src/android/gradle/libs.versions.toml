@@ -1,8 +1,8 @@
 [versions]
 # Android & Kotlin
-agp = "9.4.1"
-kotlin = "2.4.20"
-kotlinxSerialization = "1.11.0"
+agp = "9.5.2"
+kotlin = "2.4.21"
+kotlinxSerialization = "1.13.0"
 
 # AndroidX Core & Activity
 activityCompose = "1.13.0"
@@ -14,11 +14,10 @@ navigationevent = "1.2.0"
 composeBom = "2026.09.00"
 
 # Third-party
-miuix = "0.9.4"
-hiddenapibypass = "6.1"
+miuix = "0.9.5-beta03"
 junit = "4.13.2"
 coroutinesTest = "1.9.0"
-okhttp = "5.5.0"
+okhttp = "5.5.1"
 
 [libraries]
 # AndroidX
@@ -45,7 +44,6 @@ miuix-nav = { module = "top.yukonga.miuix.kmp:miuix-nav-android", version.ref = 
 miuix-preference = { module = "top.yukonga.miuix.kmp:miuix-preference-android", version.ref = "miuix" }
 miuix-blur = { module = "top.yukonga.miuix.kmp:miuix-blur-android", version.ref = "miuix" }
 miuix-squircle = { module = "top.yukonga.miuix.kmp:miuix-squircle-android", version.ref = "miuix" }
-hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version.ref = "hiddenapibypass" }
 junit = { module = "junit:junit", version.ref = "junit" }
 kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutinesTest" }
 okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -39,13 +38,14 @@ const (
 
 // UpdateOptions 定义一次订阅更新的运行上下文。
 type UpdateOptions struct {
-	Root               string
-	GroupID            string
-	ProgressDir        string
-	ProxyURL           string
-	UseConfiguredProxy bool
-	FallbackDirect     bool
-	RuntimeSyncPending bool
+	Root                string
+	GroupID             string
+	ProgressDir         string
+	ProxyURL            string
+	UseConfiguredProxy  bool
+	FallbackDirect      bool
+	RuntimeSyncPending  bool
+	GuardProviderCommit func(string, provider.Document) (func(), error)
 	// TransferContext 仅取消网络下载；转换、提交和持久化收尾仍使用调用方上下文。
 	TransferContext context.Context
 	// PersistedBeforeUpdate 表示调用方已先保存编辑设置；更新失败时仍须在错误数据中报告已保存。
@@ -377,7 +377,6 @@ func Update(ctx context.Context, options UpdateOptions) (Result, error) {
 		return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.convert_failed", "订阅下载或转换失败", fetchErr)
 	}
 	metadata = applyResponseMetadata(metadata, response.Metadata)
-	metadata.Name = resolveName(metadata)
 
 	if response.Metadata.NotModified {
 		return commitNotModified(ctx, options, groupDir, metaPath, initialSnapshot, response, usedProxy)
@@ -483,7 +482,23 @@ func Update(ctx context.Context, options UpdateOptions) (Result, error) {
 		commitReleaseRoot()
 		return updateFailure(ctx, options, metadata, groupDir, started, response, "metadata.read_failed", "读取临时元数据失败", err)
 	}
-	if err := catalog.CommitPairLocked(options.Root, groupDir, providerContent, metadataContent); err != nil {
+	releaseGuard := func() {}
+	if options.GuardProviderCommit != nil {
+		releaseGuard, err = options.GuardProviderCommit(options.GroupID, filtered)
+		if err != nil {
+			if problem, ok := errors.AsType[*Error](err); ok && problem.Code != "subscription.busy" {
+				result, failure := updateFailureLocked(options, current, groupDir, started, response, problem.Code, problem.Message, err)
+				commitReleaseRoot()
+				return result, failure
+			}
+			commitReleaseRoot()
+			clearProgress(options.ProgressDir, options.GroupID)
+			return Result{}, err
+		}
+	}
+	err = catalog.CommitPairLocked(options.Root, groupDir, providerContent, metadataContent)
+	releaseGuard()
+	if err != nil {
 		commitReleaseRoot()
 		return updateFailure(ctx, options, metadata, groupDir, started, response, "subscription.commit_failed", "订阅 Provider 与元数据提交失败", err)
 	}
@@ -543,7 +558,6 @@ func commitNotModified(ctx context.Context, options UpdateOptions, groupDir, met
 	if response.Metadata.LastModified != "" {
 		metadata.LastModified = response.Metadata.LastModified
 	}
-	metadata.Name = resolveName(metadata)
 	preserveRuntimeError := metadata.RuntimeSyncPending && isRuntimeSyncError(metadata.LastError)
 	metadata.LastAttemptAt = formatTime(options.Now)
 	metadata.LastSuccessAt = metadata.LastAttemptAt
@@ -745,27 +759,6 @@ func applyResponseMetadata(metadata catalog.Metadata, response fetch.Metadata) c
 		metadata.IntervalSource = "profile"
 	}
 	return metadata
-}
-
-func resolveName(metadata catalog.Metadata) string {
-	if strings.TrimSpace(metadata.Name) != "" && metadata.Name != metadata.ID {
-		return strings.TrimSpace(metadata.Name)
-	}
-	for _, candidate := range []string{metadata.ProfileTitle, metadata.FileName, hostName(metadata.URL), metadata.ID, "订阅"} {
-		candidate = strings.TrimSpace(candidate)
-		if candidate != "" && !strings.ContainsAny(candidate, "\r\n\t") {
-			return candidate
-		}
-	}
-	return "订阅"
-}
-
-func hostName(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return ""
-	}
-	return u.Hostname()
 }
 
 func scheduleMetadata(metadata *catalog.Metadata, now time.Time) {

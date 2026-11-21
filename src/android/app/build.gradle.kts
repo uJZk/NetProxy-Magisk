@@ -9,13 +9,13 @@ plugins {
 fun gitCommitCount(): Int {
     val repositoryRoot = rootProject.rootDir.parentFile.parentFile
     return runCatching {
-        val process = ProcessBuilder("git", "rev-list", "--count", "HEAD")
-            .directory(repositoryRoot)
-            .redirectErrorStream(true)
-            .start()
-        val output = process.inputStream.bufferedReader().use { it.readText().trim() }
-        val exitCode = process.waitFor()
-        output.toIntOrNull()?.takeIf { exitCode == 0 && it > 0 } ?: 1
+        val result = providers.exec {
+            workingDir(repositoryRoot)
+            commandLine("git", "rev-list", "--count", "HEAD")
+            isIgnoreExitValue = true
+        }
+        result.standardOutput.asText.get().trim().toIntOrNull()
+            ?.takeIf { result.result.get().exitValue == 0 && it > 0 } ?: 1
     }.getOrDefault(1)
 }
 
@@ -32,7 +32,9 @@ val managerBuildId = providers.gradleProperty("netproxyManagerBuildId").orNull ?
 android {
     namespace = "com.fanjv.netproxy"
     compileSdk {
-        version = release(37)
+        version = release(37) {
+            minorApiLevel = 2
+        }
     }
 
     compileOptions {
@@ -132,11 +134,12 @@ dependencies {
     implementation(libs.miuix.preference)
     implementation(libs.miuix.blur)
     implementation(libs.miuix.squircle)
+    implementation("top.yukonga.miuix.kmp:miuix-glass-android:${libs.versions.miuix.get()}")
+    implementation("top.yukonga.miuix.kmp:miuix-glass-icons-android:${libs.versions.miuix.get()}")
     implementation(libs.scripta.editor)
     implementation(libs.androidx.navigationevent.compose)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
-    implementation(libs.hiddenapibypass)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)

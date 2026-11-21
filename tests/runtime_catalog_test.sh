@@ -22,9 +22,7 @@ cp "$MODDIR/config/module.json" "$MODULE_JSON"
 cp "$MODDIR/config/inbound/inbound.json" "$TEST_MODULE/config/inbound/inbound.json"
 mkdir -p "$TEST_MODULE/config/singbox" "$TEST_MODULE/runtime"
 cp "$SINGBOX_DIR/config.json" "$TEST_MODULE/config/singbox/config.json"
-printf '%s\n' '{"inbounds":[]}' > "$TEST_MODULE/runtime/inbound.json"
-printf '%s\n' '{"providers":[]}' > "$TEST_MODULE/runtime/providers.json"
-printf '%s\n' '{"outbounds":[]}' > "$TEST_MODULE/runtime/outbounds.json"
+printf '%s\n' '{"inbounds":[],"providers":[],"outbounds":[]}' > "$TEST_MODULE/runtime/config.json"
 cp "$MODDIR/data/catalog/default/meta.json" "$CATALOG_DIR/default/meta.json"
 cp "$MODDIR/data/catalog/default/meta.json" "$CATALOG_DIR/secondary/meta.json"
 sed -i 's/"node_count": 0/"node_count": 1/' "$CATALOG_DIR/default/meta.json" "$CATALOG_DIR/secondary/meta.json"
@@ -97,12 +95,6 @@ assert.equal(appliedModule.ok, true, appliedModule.message);
 assert.deepEqual(JSON.parse(moduleRead('module').content), moduleConfig);
 const wifi = moduleRead('module/wifi');
 const autoStart = moduleRead('module/auto_start');
-const beforeSelection = moduleRead('module');
-moduleConfig.selection.node_tag = 'SOCKS';
-writeFileSync(modulePath, JSON.stringify(moduleConfig));
-assert.notEqual(moduleRead('module').revision, beforeSelection.revision);
-assert.equal(moduleRead('module/wifi').revision, wifi.revision);
-assert.equal(moduleRead('module/auto_start').revision, autoStart.revision);
 const nextWiFi = { ...moduleConfig.wifi, blacklist: [' Home, Wi-Fi ', 'Office'] };
 assert.equal(moduleWrite('validate', 'module/wifi', { wifi: nextWiFi }, wifi.revision).ok, true);
 assert.deepEqual(JSON.parse(moduleRead('module/wifi').content), { wifi: moduleConfig.wifi });
@@ -110,7 +102,6 @@ const appliedWiFi = moduleWrite('apply', 'module/wifi', { wifi: nextWiFi }, wifi
 assert.equal(appliedWiFi.ok, true, appliedWiFi.message);
 assert.equal(appliedWiFi.data.revision, moduleRead('module/wifi').revision);
 assert.equal(moduleRead('module/auto_start').revision, autoStart.revision);
-assert.deepEqual(JSON.parse(moduleRead('module').content).selection, moduleConfig.selection);
 const wifiRevision = moduleRead('module/wifi').revision;
 const appliedAutoStart = moduleWrite('apply', 'module/auto_start', { auto_start: true }, autoStart.revision);
 assert.equal(appliedAutoStart.ok, true, appliedAutoStart.message);
@@ -148,8 +139,8 @@ for (const target of ['inbound', 'inbound/backend', 'inbound/root_policy', 'inbo
   }
 }
 assert.deepEqual(documents.filter(item => item.category === 'runtime').map(item => item.id),
-  ['runtime/inbound.json', 'runtime/outbounds.json', 'runtime/providers.json']);
-for (const target of ['runtime/inbound.json', 'runtime/outbounds.json', 'runtime/providers.json']) {
+  ['runtime/config.json']);
+for (const target of ['runtime/config.json']) {
   assert.equal(documents.find(item => item.id === target).editable, false);
   success('config', 'read', target);
   assert.equal(run('config', 'apply', target, inboundPath).ok, false);

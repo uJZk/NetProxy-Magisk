@@ -32,14 +32,13 @@ import java.net.NetworkInterface
 internal data class CatalogDashboardUiState(
     val connection: ModuleAvailability? = null,
     val loading: Boolean = true,
+    val serviceStatusKnown: Boolean = false,
     val serviceState: String = "stopped",
     val serviceError: String = "",
     val readyAt: Long = 0,
     val uptimeSeconds: Long = 0,
     val outboundMode: String = "unknown",
     val availableOutboundModes: List<String> = emptyList(),
-    val activeGroupId: String = "",
-    val currentNode: String = "",
     val downloadBytesPerSecond: Long = 0,
     val uploadBytesPerSecond: Long = 0,
     val downloadTotal: Long = 0,
@@ -53,10 +52,13 @@ internal data class CatalogDashboardUiState(
     val noticeId: Long = 0
 ) {
     val connected: Boolean get() = connection?.available == true
+    val canToggleService: Boolean get() = connected && serviceStatusKnown && !loading && !isServiceControlBusy &&
+        (serviceState == "ready" || serviceState == "stopped" || serviceState == "failed")
     val isServiceTransitioning: Boolean
         get() = operation == "start" || operation == "stop"
     val isReady: Boolean
         get() = serviceState == "ready" && !isServiceTransitioning
+    val showRunningCard: Boolean get() = connected && isReady
     val isStarting: Boolean
         get() = operation == "start" || serviceState in setOf("preparing", "starting")
     val isStopping: Boolean
@@ -87,7 +89,8 @@ internal class CatalogDashboardViewModel(
         val available = availability?.available == true
         _state.update {
             it.copy(connection = availability,
-                loading = available && (!previous.connected || previous.loading))
+                loading = available && (!previous.connected || previous.loading),
+                serviceStatusKnown = available && previous.serviceStatusKnown)
         }
         if (available && visible) {
             startUptimeTicker()
@@ -116,6 +119,7 @@ internal class CatalogDashboardViewModel(
                 startEvents()
             }
         } else {
+            _state.update { it.copy(serviceStatusKnown = false) }
             eventsJob?.cancel()
             eventsJob = null
             snapshotJob?.cancel()
@@ -126,8 +130,8 @@ internal class CatalogDashboardViewModel(
     }
 
     fun toggleService() {
-        if (!canControlService()) return
-        val action = if (_state.value.serviceState in setOf("ready", "starting", "preparing")) {
+        if (!_state.value.canToggleService) return
+        val action = if (_state.value.isReady) {
             "stop"
         } else {
             "start"
@@ -151,11 +155,6 @@ internal class CatalogDashboardViewModel(
         }
     }
 
-    private fun canControlService(): Boolean =
-        _state.value.connected &&
-            !_state.value.loading &&
-            _state.value.operation.isEmpty()
-
     fun clearNotice() {
         _state.update { it.copy(notice = UiText.Empty) }
     }
@@ -168,7 +167,9 @@ internal class CatalogDashboardViewModel(
                     val revision = ++stateRevision
                     result.fold(
                         onSuccess = { readSnapshot(revision, it) },
-                        onFailure = { error -> _state.update { it.copy(loading = false, serviceError = error.userMessage()) } }
+                        onFailure = { error -> _state.update {
+                            it.copy(loading = false, serviceStatusKnown = false, serviceError = error.userMessage())
+                        } }
                     )
                 }
             }
@@ -241,7 +242,7 @@ internal class CatalogDashboardViewModel(
             _state.update {
                 it.copy(
                     loading = false,
-                    serviceState = "failed",
+                    serviceStatusKnown = false,
                     serviceError = error.userMessage()
                 )
             }
@@ -273,6 +274,7 @@ internal class CatalogDashboardViewModel(
                 _state.update {
                     it.copy(
                         operation = "",
+                        serviceStatusKnown = if (error != null && name in setOf("start", "stop")) false else it.serviceStatusKnown,
                         serviceState = when {
                             error != null && name in setOf("start", "stop") -> previousServiceState
                             error == null && name == "start" -> "ready"
@@ -305,35 +307,3 @@ internal fun shouldApplyDashboardSnapshot(
     currentRevision: Long,
     operation: String
 ): Boolean = requestRevision == currentRevision && operation.isEmpty()
-
-/** 将持久选择状态转换为适合仪表盘展示的节点名称。 */
-internal fun dashboardNodeName(service: ServiceStatusSnapshot): String {
-    if (service.activeGroupNodeCount <= 0) return ""
-
-    val groupName = service.activeGroupName.ifBlank { service.activeGroupId }
-    val automatic = service.selectorMode == "urltest"
-    if (automatic) {
-        val selected = if (service.state == "ready") {
-            runtimeSelectedNodeTag(
-                service.activeGroupRuntimeTag,
-                service.runtimeSelected
-            )
-        } else {
-            ""
-        }
-        if (selected.isNotBlank()) return "$selected · Auto-Fastest"
-        return "$groupName/Auto-Fastest"
-    }
-    val nodeName = service.selectedNodeRef
-        .substringAfter('/', service.selectedNodeRef)
-        .ifBlank { service.runtimeSelected.substringAfter('/', service.runtimeSelected) }
-    return listOf(groupName, nodeName).filter(String::isNotBlank).joinToString("/")
-}
-
-internal fun runtimeSelectedNodeTag(runtimeTag: String, selected: String): String {
-    if (runtimeTag.isBlank()) return ""
-    val prefix = "$runtimeTag/"
-    return selected.removePrefix(prefix)
-        .takeIf { selected.startsWith(prefix) && it.isNotBlank() }
-        .orEmpty()
-}

@@ -25,9 +25,11 @@ import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.captionBar
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.overscroll
@@ -248,12 +250,16 @@ fun CodeEditor(
      * 每次重组换新实例会把两级缓存整个冲掉、逐帧全量重算。
      */
     highlighter: SyntaxHighlighter? = null,
+    /** Space above the first line that scrolls away beneath the host's fixed toolbar. */
+    topContentInset: androidx.compose.ui.unit.Dp = 0.dp,
+    onTopContentScroll: ((Float) -> Unit)? = null,
 ) {
     // 初始内容在 rememberCodeEditorController(initialText) 工厂里播种（构造即播种：无空文档首帧、
     // 无重组重播风险）；换文档走 controller.setDocument。本 composable 不再有文本入参。
     val engine = controller.engine
     val findSession = controller.find
     val gotoSession = controller.gotoLine
+    val dockedPanelVisible = findSession.visible || gotoSession.visible
     engine.autoClosePairs = autoClosePairs // 键入路径读引擎字段（非 state），组合期同步参数即可
 
     // 匹配括号：光标邻接 ()[]{} 时点亮该括号与配对方。derivedState 依赖 caret（选区 state 派生）与
@@ -411,6 +417,7 @@ fun CodeEditor(
         )
     }
     val lineHeightPx = with(density) { lineHeightSp.sp.toPx() }
+    val topContentInsetPx = if (dockedPanelVisible) 0f else with(density) { topContentInset.toPx() }
     // padX 随字号成比例（默认 14sp→8dp），使内边距与 gutter 宽在缩放下自相似——预览等比缩放与松手重排几何一致、行号不跳。
     val padXPx = with(density) { (PAD_X_BASE_DP * fontSizeSp / LAYOUT_BASE_FONT_SP).dp.toPx() }
     // 拖动手柄半径与命中外扩（细光标线太小，靠 slop 放大可抓区域）。
@@ -487,9 +494,19 @@ fun CodeEditor(
 
     // 每帧高频写读的量用 primitive FloatState，避免装箱 Float（滚动/拖拽每帧几个装箱分配纯属浪费）。
     var scrollY by remember { mutableFloatStateOf(0f) }
+    if (onTopContentScroll != null) {
+        val reportScroll by rememberUpdatedState(onTopContentScroll)
+        LaunchedEffect(dockedPanelVisible) {
+            // Find and go-to sit below the toolbar, so their viewport does not overlap it.
+            snapshotFlow { if (dockedPanelVisible) 0f else scrollY }.collect { reportScroll(it) }
+        }
+    }
     var scrollX by remember { mutableFloatStateOf(0f) }
     var viewportWidth by remember { mutableFloatStateOf(0f) }
     var viewportHeight by remember { mutableFloatStateOf(0f) }
+    val revealedHeight = (viewportHeight - with(density) { LocalEditorBottomContentInset.current.toPx() }.coerceAtLeast(0f))
+        .coerceAtLeast(minOf(viewportHeight, lineHeightPx))
+    val liveRevealedHeight by rememberUpdatedState(revealedHeight)
     // 编辑器内容区顶边在窗口中的 y（放大镜 Popup 用它把胶囊上浮到工具栏/状态栏空间、不越出窗口顶）。IME/旋转会变，实时更新。
     var contentTopInWindow by remember { mutableFloatStateOf(0f) }
 
@@ -567,24 +584,24 @@ fun CodeEditor(
     // 行 -> 顶部像素 / 像素 -> 行（换行走视觉行索引，不换行走平凡公式，行为不变）。
     fun lineTopPx(line: Int): Float {
         if (softWrap) drainRowSplices() // 编辑后重组前就可能被读（keep-in-view 等），先把行结构变化落进索引
-        return if (softWrap) rowIndex.rowsBefore(line) * lineHeightPx else line * lineHeightPx
+        return topContentInsetPx + if (softWrap) rowIndex.rowsBefore(line) * lineHeightPx else line * lineHeightPx
     }
 
     fun lineAtPx(y: Float): Int {
         if (softWrap) drainRowSplices()
-        val row = (y / lineHeightPx).toInt().coerceAtLeast(0)
+        val row = ((y - topContentInsetPx) / lineHeightPx).toInt().coerceAtLeast(0)
         return if (softWrap) rowIndex.lineAtRow(row) else row.coerceIn(0, (lineCount - 1).coerceAtLeast(0))
     }
 
     // 翻页行数：约一屏可见行减 1 行重叠（至少 1）。viewportHeight/lineHeightPx 为实时几何。
-    fun pageLines(): Int = ((viewportHeight / lineHeightPx).toInt() - 1).coerceAtLeast(1)
+    fun pageLines(): Int = ((revealedHeight / lineHeightPx).toInt() - 1).coerceAtLeast(1)
 
     // 量化滚动：组合只订阅「首个可见行」，跨行才重组；同一行内的滚动仅由 EditorCanvas 在 draw 阶段读
     // 像素级 scrollY/scrollX 平滑重绘，不再每滚 1px 全量重组。derivedStateOf 仅在整数结果变化时通知读者。
     // lineCount 必须作 key：derivedStateOf 的 lineAtPx 闭包捕获 lineCount 做 coerceIn 上界，行数变化（尤其
     // 初始 setText 把 1→N）时须重建闭包，否则捕获旧上界（如 1）会把 scrollLine 永远钳到 0、预测量窗口不前移，
     // 靠下的长/网格行不计入 widestSeen、横向滚动范围被卡死（不换行模式下 rowIndex 恒定、不再连带触发重建）。
-    val scrollLine by remember(rowIndex, lineHeightPx, softWrap, lineCount) { derivedStateOf { lineAtPx(scrollY) } }
+    val scrollLine by remember(rowIndex, lineHeightPx, softWrap, lineCount, topContentInsetPx) { derivedStateOf { lineAtPx(scrollY) } }
 
     // 预测量可见窗口（组合阶段填充缓存 + 行索引），并求不换行下最宽行以定横向滚动范围。
     val firstVisibleLine = (scrollLine - 3).coerceAtLeast(0)
@@ -616,14 +633,14 @@ fun CodeEditor(
         }
     }
 
-    val contentHeight = (if (softWrap) rowIndex.totalRows() else lineCount) * lineHeightPx
+    val contentHeight = topContentInsetPx + (if (softWrap) rowIndex.totalRows() else lineCount) * lineHeightPx
     // 两个纵向上界（见 [BOTTOM_SCROLL_PAD_FRACTION]）：maxScrollY 含底部留白，供**主动滚动/渲染/命中/缩放预览**
     // （可滚过文末、末行上移下方留空）；maxScrollYSettle 是不含留白的自然底（末行贴底），仅供**视口变大时的 settle**
     // （收键盘/转屏变高）夹回贴底、不残留留白。留白用连续式 `(内容高−视口+留白).coerceAtLeast(0)`（非「溢出才加」的分段）：
     // 临界字号平滑、焦点滚动量落钳制内不被夹回。缩放预览的纵向上界同样含留白（与提交 re-clamp 同式 ⇒ 松手不跳、起手不 snap）。
     val bottomScrollPadPx = viewportHeight * BOTTOM_SCROLL_PAD_FRACTION
-    val maxScrollY = (contentHeight - viewportHeight + bottomScrollPadPx).coerceAtLeast(0f)
-    val maxScrollYSettle = (contentHeight - viewportHeight).coerceAtLeast(0f)
+    val maxScrollY = (contentHeight - revealedHeight + bottomScrollPadPx).coerceAtLeast(0f)
+    val maxScrollYSettle = (contentHeight - revealedHeight).coerceAtLeast(0f)
     val maxScrollX = if (softWrap) 0f else {
         (gutterWidthPx + padXPx * 2 + widestSeen[0] + viewportWidth * RIGHT_SCROLL_PAD_FRACTION - viewportWidth)
             .coerceAtLeast(0f)
@@ -866,8 +883,9 @@ fun CodeEditor(
         } else 0
         val caretTop = lineTopPx(line) + curRow * lineHeightPx
         val caretBottom = caretTop + lineHeightPx
-        if (caretTop < scrollY) scrollY = caretTop
-        else if (caretBottom > scrollY + viewportHeight) scrollY = caretBottom - viewportHeight
+        val coveredHeight = with(density) { topContentInset.toPx() }.takeUnless { dockedPanelVisible } ?: 0f
+        if (caretTop < scrollY + coveredHeight) scrollY = (caretTop - coveredHeight).coerceAtLeast(0f)
+        else if (caretBottom > scrollY + revealedHeight) scrollY = caretBottom - revealedHeight
         // 横向随动：不换行时若光标越出可见带则滚动露出（clip-gate：可见即不动、留 margin 前瞻）。纯纵向导航（目标列生效）
         // 时跳过——否则目标列在短/长行间夹变会让视口横向来回 snap，很突兀。
         if (!softWrap && viewportWidth > 0f && !engine.hasGoalColumn) {
@@ -886,10 +904,10 @@ fun CodeEditor(
         var first = true
         var lastSel = engine.selection
         var lastTick = engine.revealTick
-        var lastVh = viewportHeight
+        var lastVh = liveRevealedHeight
         var lastVw = viewportWidth
         snapshotFlow {
-            listOf(engine.revealTick, engine.selection, viewportHeight, viewportWidth, selectionDragActive || caretDragActive)
+            listOf(engine.revealTick, engine.selection, liveRevealedHeight, viewportWidth, selectionDragActive || caretDragActive)
         }.collect {
             if (viewportHeight <= 0f) return@collect // 尺寸未定不消费 first：等真实尺寸那次再算首发
             if (selectionDragActive || caretDragActive) return@collect // 选区/光标手柄拖拽时由边缘自动滚动接管
@@ -901,11 +919,11 @@ fun CodeEditor(
             val sel = engine.selection
             val tick = engine.revealTick
             val explicit = first || sel != lastSel || tick != lastTick
-            val shrank = viewportHeight < lastVh || viewportWidth < lastVw
+            val shrank = liveRevealedHeight < lastVh || viewportWidth < lastVw
             first = false
             lastSel = sel
             lastTick = tick
-            lastVh = viewportHeight
+            lastVh = liveRevealedHeight
             lastVw = viewportWidth
             if (!explicit) {
                 if (!shrank) return@collect
@@ -1160,6 +1178,7 @@ fun CodeEditor(
 
     // 根为 Column：查找条停靠最上，文本区与右侧符号栏共用中间区域，底部工具栏统一处理系统栏安全区。
     Column(modifier.background(colors.background)) {
+        if (dockedPanelVisible) Box(Modifier.height(topContentInset))
         // 停靠式查找/替换条：占自己的布局行，文本区随开合让位；不用 Popup——Android 上 focusable Popup
         // 会吞掉浮层外全部触摸（编辑区/宿主工具栏点不动），而输入框又必须可获焦收 IME。
         FindReplaceBar(
@@ -2020,6 +2039,7 @@ fun CodeEditor(
                     colors = colors,
                     onSymbol = { symbol -> engine.typeCharacter(symbol.value) },
                     windowInsets = bottomBarInsets.takeUnless { handlesBottomInsets },
+                    modifier = Modifier.padding(top = if (dockedPanelVisible) 0.dp else topContentInset),
                 )
             }
         }

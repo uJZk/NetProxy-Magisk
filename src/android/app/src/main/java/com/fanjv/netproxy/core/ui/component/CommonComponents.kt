@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -16,31 +17,26 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
-import com.fanjv.netproxy.core.ui.theme.LocalEnableBlur
+import com.fanjv.netproxy.R
 import com.fanjv.netproxy.core.ui.theme.isInDarkTheme
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.blur.BlendColorEntry
-import top.yukonga.miuix.kmp.blur.BlurColors
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import top.yukonga.miuix.kmp.blur.rememberLayerBackdrop
-import top.yukonga.miuix.kmp.blur.textureBlur
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Back
-import top.yukonga.miuix.kmp.shader.isRenderEffectSupported
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import top.yukonga.miuix.kmp.theme.MiuixTheme.isDynamicColor
@@ -55,14 +51,15 @@ import top.yukonga.miuix.kmp.utils.PressFeedbackType
  */
 @Composable
 fun BackIconButton(onClick: () -> Unit) {
-    IconButton(onClick = onClick) {
+    AppBarButton(onClick = onClick) {
         val layoutDirection = LocalLayoutDirection.current
+        val icon = chromeIcon(MiuixIcons.Back)
         Icon(
             modifier = Modifier.graphicsLayer {
-                if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
+                if (!icon.autoMirror && layoutDirection == LayoutDirection.Rtl) scaleX = -1f
             },
-            imageVector = MiuixIcons.Back,
-            contentDescription = null,
+            imageVector = icon,
+            contentDescription = stringResource(R.string.back),
             tint = colorScheme.onSurface,
         )
     }
@@ -99,8 +96,8 @@ internal fun rememberCommitOnLeave(requestCommit: () -> Unit): (() -> Unit) -> U
 
 /** 当模糊可用时创建模糊背景层（[LayerBackdrop]），否则返回 null。 */
 @Composable
-fun rememberBlurBackdrop(enableBlur: Boolean = LocalEnableBlur.current): LayerBackdrop? {
-    if (!enableBlur || !isRenderEffectSupported()) return null
+fun rememberBlurBackdrop(): LayerBackdrop? {
+    if (android.os.Build.VERSION.SDK_INT < 31) return null
     val surfaceColor = colorScheme.surface
     return rememberLayerBackdrop {
         drawRect(surfaceColor)
@@ -114,23 +111,7 @@ fun BlurredBar(
     backdrop: LayerBackdrop?,
     content: @Composable () -> Unit,
 ) {
-    val surfaceColor = colorScheme.surface
-    Box(
-        modifier = if (backdrop != null) {
-            Modifier.textureBlur(
-                backdrop = backdrop,
-                shape = RectangleShape,
-                blurRadius = 25f,
-                colors = BlurColors(
-                    blendColors = listOf(
-                        BlendColorEntry(color = surfaceColor.copy(alpha = 0.8f)),
-                    ),
-                ),
-            )
-        } else {
-            Modifier
-        }
-    ) {
+    CompositionLocalProvider(LocalBarBackdrop provides backdrop) {
         content()
     }
 }

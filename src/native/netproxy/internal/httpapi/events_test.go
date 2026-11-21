@@ -270,7 +270,7 @@ func TestCoreGroupsFixedWindowPublishesLatestWithoutRPC(t *testing.T) {
 			defer api.Close()
 			f.h.server.options.ServiceAddress = api.URL
 			send := func(selected string) {
-				groups := []serviceapi.Group{{Tag: "Auto/" + f.snapshot.Selection.ActiveGroupRuntimeTag, Selected: selected}}
+				groups := []serviceapi.Group{{Tag: "Proxy", Selected: selected}}
 				if f.consume(coreEvent{generation: f.generation, groups: &groups}) {
 					t.Fatal("相同 core 身份触发重新校准")
 				}
@@ -300,8 +300,8 @@ func TestCoreGroupsFixedWindowPublishesLatestWithoutRPC(t *testing.T) {
 			}
 		published:
 			want := 1
-			if topics == topicStatus|topicGroups {
-				want = 2
+			if topics == topicStatus {
+				want = 0
 			}
 			if len(client.messages) != want {
 				t.Fatal("消费者缺少主题快照", len(client.messages))
@@ -466,7 +466,7 @@ func TestMissingTopicsRequiresFullInitialStatus(t *testing.T) {
 		t.Fatal("traffic 错误替代了完整 status", got)
 	}
 	h.emit(topicStatus, "status", contract.Success("service.status", "状态", nil))
-	h.emit(topicGroups, "groups", contract.Success("node.snapshot", "节点", nil))
+	h.emit(topicGroups, "groups", contract.Success("policy.groups", "节点", nil))
 	h.emit(topicSubscriptions, "subscriptions", contract.Success("subscription.list", "订阅", nil))
 	if h.missingTopics() != 0 {
 		t.Fatal("已存在的快照仍需重新读取")
@@ -601,14 +601,14 @@ func TestFileEventsOnlyRefreshAffectedTopics(t *testing.T) {
 		op     fsnotify.Op
 		topics int
 	}{
-		{options.ModuleConfig, fsnotify.Write, topicStatus | topicGroups},
+		{options.ModuleConfig, fsnotify.Write, topicStatus},
 		{options.StateFile, fsnotify.Create, topicStatus | topicGroups},
 		{options.InboundConfig, fsnotify.Write, topicStatus},
-		{paths.SingBoxConfig(options.SingBoxDir), fsnotify.Rename, topicStatus},
-		{options.CatalogRoot, fsnotify.Create, allTopics},
-		{filepath.Join(options.CatalogRoot, "default"), fsnotify.Remove, allTopics},
-		{filepath.Join(options.CatalogRoot, "default", "provider.json"), fsnotify.Write, allTopics},
-		{filepath.Join(options.CatalogRoot, "default", "meta.json"), fsnotify.Write, allTopics},
+		{paths.SingBoxConfig(options.SingBoxDir), fsnotify.Rename, topicStatus | topicGroups},
+		{options.CatalogRoot, fsnotify.Create, topicGroups | topicSubscriptions},
+		{filepath.Join(options.CatalogRoot, "default"), fsnotify.Remove, topicGroups | topicSubscriptions},
+		{filepath.Join(options.CatalogRoot, "default", "provider.json"), fsnotify.Write, topicGroups | topicSubscriptions},
+		{filepath.Join(options.CatalogRoot, "default", "meta.json"), fsnotify.Write, topicGroups | topicSubscriptions},
 		{filepath.Join(options.CatalogRoot, "default", "history.jsonl"), fsnotify.Write, 0},
 		{filepath.Join(options.CatalogRoot, "staging", "provider.json"), fsnotify.Write, 0},
 		{filepath.Join(options.ProgressDir, "subscription-test.progress.json"), fsnotify.Write, topicSubscriptions},
@@ -663,6 +663,19 @@ func runningWatcherHub(t *testing.T) (*eventHub, *fsnotify.Watcher, *eventSubscr
 	return h, watcher, client
 }
 
+func renameWatcherFixture(t *testing.T, root, name string) {
+	t.Helper()
+	path := filepath.Join(root, "subscription-test", "meta.json")
+	metadata, err := catalog.LoadMetadata(t.Context(), path, "subscription-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata.Name = name
+	if err := catalog.SaveMetadataAtomic(t.Context(), path, metadata); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWatcherOverflowRebuildsWatchesAndSnapshots(t *testing.T) {
 	h, watcher, client := runningWatcherHub(t)
 	for _, directory := range watcher.WatchList() {
@@ -670,9 +683,7 @@ func TestWatcherOverflowRebuildsWatchesAndSnapshots(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := catalog.SetGroupName(t.Context(), h.server.options.CatalogRoot, "subscription-test", "OVERFLOW_RECOVERED", time.Now()); err != nil {
-		t.Fatal(err)
-	}
+	renameWatcherFixture(t, h.server.options.CatalogRoot, "OVERFLOW_RECOVERED")
 	select {
 	case watcher.Errors <- fsnotify.ErrEventOverflow:
 	case <-time.After(5 * time.Second):
@@ -680,9 +691,7 @@ func TestWatcherOverflowRebuildsWatchesAndSnapshots(t *testing.T) {
 	}
 	for _, name := range []string{"OVERFLOW_RECOVERED", "WATCH_RESTORED"} {
 		if name == "WATCH_RESTORED" {
-			if err := catalog.SetGroupName(t.Context(), h.server.options.CatalogRoot, "subscription-test", name, time.Now()); err != nil {
-				t.Fatal(err)
-			}
+			renameWatcherFixture(t, h.server.options.CatalogRoot, name)
 		}
 		select {
 		case event := <-client.messages:
@@ -716,9 +725,7 @@ func TestFileEventBatchHasFixedRefreshDeadline(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := catalog.SetGroupName(t.Context(), h.server.options.CatalogRoot, "subscription-test", "BATCHED", time.Now()); err != nil {
-		t.Fatal(err)
-	}
+	renameWatcherFixture(t, h.server.options.CatalogRoot, "BATCHED")
 	event := fsnotify.Event{Name: filepath.Join(h.server.options.CatalogRoot, "subscription-test", "meta.json"), Op: fsnotify.Write}
 	select {
 	case watcher.Events <- event:

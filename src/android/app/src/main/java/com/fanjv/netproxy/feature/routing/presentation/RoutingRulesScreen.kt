@@ -43,36 +43,41 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.fanjv.netproxy.R
 import com.fanjv.netproxy.core.di.netProxyViewModel
+import com.fanjv.netproxy.core.ui.component.AppDialogButton
+import com.fanjv.netproxy.core.ui.component.DialogActionRole
+import com.fanjv.netproxy.core.ui.component.dialogTextFieldColors
 import com.fanjv.netproxy.core.ui.component.AdaptiveTopAppBar
 import com.fanjv.netproxy.core.ui.component.BackIconButton
 import com.fanjv.netproxy.core.ui.component.BlurredBar
 import com.fanjv.netproxy.core.ui.component.CardItem
 import com.fanjv.netproxy.core.ui.component.ContentStatus
+import com.fanjv.netproxy.core.ui.component.appBarOverscroll
 import com.fanjv.netproxy.core.ui.component.groupedCardSection
 import com.fanjv.netproxy.core.ui.component.rememberBlurBackdrop
+import com.fanjv.netproxy.feature.proxy.data.AUTO_POLICY_TAG
 import com.fanjv.netproxy.feature.routing.model.LocalRuleSet
 import com.fanjv.netproxy.feature.routing.model.RuleField
 import com.fanjv.netproxy.feature.routing.model.RuleInputError
+import com.fanjv.netproxy.feature.routing.model.policyRule
 import com.fanjv.netproxy.feature.routing.model.simpleRule
 import com.fanjv.netproxy.navigation.LocalNavigator
 import com.fanjv.netproxy.navigation.Route
-import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Icon
-import top.yukonga.miuix.kmp.basic.IconButton
+import com.fanjv.netproxy.core.ui.component.AppBarButton as IconButton
 import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
-import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.glass.GlassTextField as TextField
 import top.yukonga.miuix.kmp.blur.layerBackdrop
+import com.fanjv.netproxy.core.ui.component.chromeIcon
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.extended.Add
-import top.yukonga.miuix.kmp.overlay.OverlayDialog
+import com.fanjv.netproxy.core.ui.component.AppDialog as OverlayDialog
 import top.yukonga.miuix.kmp.preference.ArrowPreference
-import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
+import com.fanjv.netproxy.core.ui.component.AppDropdown as OverlayDropdownPreference
 import top.yukonga.miuix.kmp.theme.MiuixTheme
-import top.yukonga.miuix.kmp.utils.overScrollVertical
 import top.yukonga.miuix.kmp.utils.scrollEndHaptic
 
 @Composable
@@ -103,7 +108,7 @@ internal fun RoutingRulesScreen(
                     scrollBehavior = scrollBehavior,
                     actions = {
                         IconButton(onClick = viewModel::add, enabled = state.canAdd) {
-                            Icon(MiuixIcons.Add, stringResource(R.string.routing_add), tint = MiuixTheme.colorScheme.onSurface)
+                            Icon(chromeIcon(MiuixIcons.Add), stringResource(R.string.routing_add), tint = MiuixTheme.colorScheme.onSurface)
                         }
                     },
                 )
@@ -127,23 +132,10 @@ internal fun RoutingRulesScreen(
                     }
                 }
             }
-        } else if (state.isEmpty) {
-            Column(
-                Modifier.fillMaxSize()
-                    .then(if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier)
-                    .padding(padding).padding(horizontal = 26.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
-            ) {
-                Text(stringResource(R.string.routing_empty), style = MiuixTheme.textStyles.body1,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary, textAlign = TextAlign.Center)
-                Text(stringResource(R.string.routing_empty_hint), style = MiuixTheme.textStyles.footnote1,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary, textAlign = TextAlign.Center)
-            }
         } else LazyColumn(
             modifier = Modifier.fillMaxSize()
                 .then(if (backdrop != null) Modifier.layerBackdrop(backdrop) else Modifier)
-                .scrollEndHaptic().overScrollVertical().nestedScroll(scrollBehavior.nestedScrollConnection),
+                .scrollEndHaptic().appBarOverscroll(scrollBehavior).nestedScroll(scrollBehavior.nestedScrollConnection),
             contentPadding = PaddingValues(
                 top = padding.calculateTopPadding() + 6.dp,
                 start = padding.calculateStartPadding(layoutDirection) + 12.dp,
@@ -152,6 +144,18 @@ internal fun RoutingRulesScreen(
             ),
             overscrollEffect = null,
         ) {
+            if (state.isEmpty) item("empty") {
+                Column(
+                    Modifier.fillParentMaxHeight().fillMaxWidth().padding(horizontal = 14.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically),
+                ) {
+                    Text(stringResource(R.string.routing_empty), style = MiuixTheme.textStyles.body1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary, textAlign = TextAlign.Center)
+                    Text(stringResource(R.string.routing_empty_hint), style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary, textAlign = TextAlign.Center)
+                }
+            }
             LocalRuleSet.entries.forEach { target ->
                 if (state.showPageError(target)) item("error:${target.tag}") {
                     RuleFileError(target, state, reload = { viewModel.refresh(discardDraft = true) }, rawEdit = rawEdit)
@@ -162,10 +166,14 @@ internal fun RoutingRulesScreen(
                 { stringResource(R.string.routing_matches) },
                 rules.map { identity -> CardItem("${identity.target.tag}:${identity.index}") {
                     val rule = state.files.getValue(identity.target).document!!.rules[identity.index]
-                    val simple = remember(rule) { rule.simpleRule() }
+                    val policy = remember(rule) { rule.policyRule() }
+                    val simple = remember(rule) { policy?.second ?: rule.simpleRule() }
+                    val destination = policy?.let { (tag, _) ->
+                        state.policyTargets.firstOrNull { it.tag == tag }?.label() ?: tag
+                    } ?: stringResource(identity.target.title())
                     ArrowPreference(
                         title = simple?.values?.first()?.take(100) ?: stringResource(R.string.routing_advanced),
-                        summary = stringResource(identity.target.title()) + " · " + (simple?.let {
+                        summary = destination + " · " + (simple?.let {
                             stringResource(it.field.title()) + if (it.values.size > 1) " · " + stringResource(R.string.routing_values_count, it.values.size) else ""
                         } ?: stringResource(R.string.routing_advanced_hint)),
                         onClick = { viewModel.edit(identity) },
@@ -202,6 +210,32 @@ internal fun RoutingRulesScreen(
                         onSelectedIndexChange = { viewModel.selectTarget(LocalRuleSet.entries[it]) })
                     else Text(stringResource(R.string.routing_type) + ": " + stringResource(draft.target.title()),
                         style = MiuixTheme.textStyles.body2)
+                    if (draft.target == LocalRuleSet.Policy) {
+                        when {
+                            file.document != null && file.document.policyStart == null -> {
+                                Text(stringResource(R.string.routing_policy_order_unsupported),
+                                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                                AppDialogButton(stringResource(R.string.routing_raw), { rawEdit(draft.target) },
+                                    Modifier.fillMaxWidth(), enabled = !state.isLoading && !state.isSaving)
+                            }
+                            state.policyTargets.isEmpty() -> Text(stringResource(R.string.routing_policy_no_groups),
+                                color = MiuixTheme.colorScheme.onSurfaceVariantSummary)
+                            else -> {
+                                val targets = state.policyTargets
+                                val selected = targets.indexOfFirst { it.tag == draft.policyTag }
+                                OverlayDropdownPreference(
+                                    title = stringResource(R.string.routing_policy_group),
+                                    items = listOf(draft.policyTag?.takeIf { selected < 0 }
+                                        ?: stringResource(R.string.routing_policy_choose)) +
+                                        targets.map { it.label() },
+                                    selectedIndex = selected + 1,
+                                    enabled = state.editable(draft.target),
+                                    insideMargin = PaddingValues(vertical = 12.dp),
+                                    onSelectedIndexChange = { index -> targets.getOrNull(index - 1)?.let { viewModel.selectPolicy(it.tag) } },
+                                )
+                            }
+                        }
+                    }
                     val field = draft.field
                     if (field != null) {
                         OverlayDropdownPreference(title = stringResource(R.string.routing_match),
@@ -209,7 +243,7 @@ internal fun RoutingRulesScreen(
                             enabled = !state.isSaving,
                             insideMargin = PaddingValues(vertical = 12.dp),
                             onSelectedIndexChange = { viewModel.updateDraft(RuleField.entries[it], textState.text.toString()) })
-                        TextField(state = textState,
+                        TextField(colors = dialogTextFieldColors(state.inputError != null), state = textState,
                             label = stringResource(R.string.routing_values), lineLimits = TextFieldLineLimits.MultiLine(3, 6),
                             keyboardOptions = KeyboardOptions(autoCorrectEnabled = false,
                                 keyboardType = if (field == RuleField.DomainKeyword) KeyboardType.Text else KeyboardType.Ascii),
@@ -222,7 +256,7 @@ internal fun RoutingRulesScreen(
                     }
                     state.inputError?.let { Text(stringResource(it.message()), color = MiuixTheme.colorScheme.error, style = MiuixTheme.textStyles.body2) }
                     if (file.error.isNotEmpty() || file.requiresReload) RuleError(file, state, reload = { viewModel.refresh(discardDraft = true) })
-                    if (file.invalidDocument) TextButton(stringResource(R.string.routing_raw), { rawEdit(draft.target) },
+                    if (file.invalidDocument) AppDialogButton(stringResource(R.string.routing_raw), { rawEdit(draft.target) },
                         Modifier.fillMaxWidth(), enabled = !state.isLoading && !state.isSaving)
                 }
                 RuleButtons(state.isSaving, viewModel::dismiss,
@@ -230,12 +264,12 @@ internal fun RoutingRulesScreen(
                         viewModel.updateDraft(draft.field, textState.text.toString())
                         viewModel.save()
                     } else { rawEdit(draft.target) } },
-                    enabled = state.editable(draft.target),
+                    enabled = if (draft.field != null) state.canSave(draft) else state.editable(draft.target),
                     confirmLabel = stringResource(if (draft.field != null) R.string.save_text else R.string.routing_raw))
                 draft.index?.let { index ->
-                    TextButton(stringResource(R.string.common_delete), { viewModel.requestDelete(RuleIdentity(draft.target, index)) },
+                    AppDialogButton(stringResource(R.string.common_delete), { viewModel.requestDelete(RuleIdentity(draft.target, index)) },
                         Modifier.fillMaxWidth(), enabled = state.editable(draft.target),
-                        colors = ButtonDefaults.textButtonColors(textColor = MiuixTheme.colorScheme.error))
+                        role = DialogActionRole.Destructive)
                 }
             }
         }
@@ -248,7 +282,8 @@ internal fun RoutingRulesScreen(
             val file = target?.let { state.files.getValue(it) }
             if (file != null && (file.error.isNotEmpty() || file.requiresReload)) RuleError(file, state, reload = { viewModel.refresh(discardDraft = true) })
             RuleButtons(state.isSaving, viewModel::dismiss,
-                confirm = viewModel::delete, enabled = target?.let(state::editable) == true, confirmLabel = stringResource(R.string.common_delete))
+                confirm = viewModel::delete, enabled = target?.let(state::editable) == true, confirmLabel = stringResource(R.string.common_delete),
+                role = DialogActionRole.Destructive)
         }
     }
 }
@@ -280,11 +315,13 @@ private fun RuleError(file: RuleFileState, state: RoutingRulesState, reload: () 
 }
 
 @Composable
-private fun RuleButtons(saving: Boolean, cancel: () -> Unit, confirm: () -> Unit, enabled: Boolean, confirmLabel: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(20.dp), verticalAlignment = Alignment.CenterVertically) {
-        TextButton(stringResource(android.R.string.cancel), cancel, Modifier.weight(1f), enabled = !saving)
+private fun RuleButtons(saving: Boolean, cancel: () -> Unit, confirm: () -> Unit, enabled: Boolean, confirmLabel: String,
+    role: DialogActionRole = DialogActionRole.Primary,
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+        AppDialogButton(stringResource(android.R.string.cancel), cancel, Modifier.weight(1f), enabled = !saving)
         if (saving) Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { InfiniteProgressIndicator(Modifier.size(24.dp)) }
-        else TextButton(confirmLabel, confirm, Modifier.weight(1f), enabled = enabled, colors = ButtonDefaults.textButtonColorsPrimary())
+        else AppDialogButton(confirmLabel, confirm, Modifier.weight(1f), enabled = enabled, role = role)
     }
 }
 
@@ -292,7 +329,12 @@ private fun LocalRuleSet.title(): Int = when (this) {
     LocalRuleSet.Proxy -> R.string.routing_proxy
     LocalRuleSet.Direct -> R.string.routing_direct
     LocalRuleSet.Block -> R.string.routing_block
+    LocalRuleSet.Policy -> R.string.routing_policy_target
 }
+
+@Composable
+private fun RoutingPolicyTarget.label(): String =
+    if (tag == AUTO_POLICY_TAG && type == "urltest") stringResource(R.string.policy_auto_select) else tag
 
 private fun RuleField.title(): Int = when (this) {
     RuleField.DomainSuffix -> R.string.routing_domain_suffix

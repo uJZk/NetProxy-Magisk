@@ -61,7 +61,7 @@ Compose UI -> ViewModel -> Repository -> NetProxyCtlClient -> netproxyctl
 
 ## 本地构建
 
-准备 Android SDK 37 和 JDK 25，然后从仓库根目录执行：
+准备 Android SDK 37.2（Build Tools 37.0.0）和 JDK 25，然后从仓库根目录执行：
 
 ```bash
 cd src/android
@@ -88,3 +88,19 @@ cd src/android
 ## 许可证
 
 NetProxy 使用 [GNU General Public License v3.0](../../LICENSE)。第三方组件保留各自许可证，详见 [NOTICE](../../NOTICE)。
+
+## OS4 Glass 构建
+
+本地、开发 CI 和正式发布统一使用 OS4 Glass。MIUIX 正式版发布前，Gradle 从 [MIUIX 官方仓库](https://github.com/compose-miuix-ui/miuix) 获取 `settings.gradle.kts` 锁定的源码到 `.gradle/miuix/`，首次构建需要 Git 和网络，不需要 GitHub Packages 令牌。在本目录执行：
+
+当前源码锁定为 `3526cfe2ca0779c5a2eab99af8737a96c9a8a885`（`0.9.5-beta03`），包含 Glass 顶栏模糊渐隐、标签栏淡出和模糊渲染开销的改进。版本目录中的 MIUIX 版本用于声明依赖，实际实现由统一源码替换决定，不跟随远端 main 自动更新。弹层使用官方 GlassTextField，顶栏与底部导航复用官方收起行为和系统安全区计算。应用搜索由 GlassSearchOverlay 按结果滚动渐显材质，JSON 快捷操作使用叠放在编辑器上的 GlassFloatingToolbar。代理策略组采用官方 Glass 分段栏材质和高度，保留横向滚动和按名称分配宽度；卡片保留细描边及轻量选中底色。
+
+该源码要求 Android 编译平台 `platforms;android-37.2`，本地与 CI 使用相同版本；`targetSdk=37`、`minSdk=26` 不变。
+
+```powershell
+.\gradlew.bat :app:assembleDebug
+```
+
+已有对应提交的 Git checkout 可通过 `-PnetproxyMiuixSource=C:/path/to/miuix` 复用，仍构建同一套界面。Glass 在平台支持时自动采样折射背景；其他情况下使用同一组件的静态材质，不需要另一个 APK。
+
+应用明暗跟随系统。「设置 → 外观」保留配色、界面缩放和仪表盘预览；预测性返回、平滑圆角与页面模糊不再提供独立开关。

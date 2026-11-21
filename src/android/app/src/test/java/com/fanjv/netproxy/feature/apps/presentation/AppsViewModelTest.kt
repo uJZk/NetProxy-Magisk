@@ -2,9 +2,7 @@ package com.fanjv.netproxy.feature.apps.presentation
 
 import com.fanjv.netproxy.core.api.*
 
-import androidx.compose.runtime.saveable.SaverScope
 import com.fanjv.netproxy.core.config.*
-import com.fanjv.netproxy.core.ui.component.SearchStatus
 import com.fanjv.netproxy.feature.apps.data.*
 import com.fanjv.netproxy.feature.apps.model.AppProxyConfig
 import com.fanjv.netproxy.feature.settings.data.ConfigRepository
@@ -332,9 +330,10 @@ class AppsViewModelTest {
         assertEquals(2, transport.writes)
         assertFalse(transport.config.enabled)
         vm.toggle("0:alpha.example")
-        yield()
+        assertTrue(vm.flushPolicy())
         assertEquals(2, transport.writes)
-        assertTrue(vm.state.value.hasPendingPolicy)
+        assertFalse(vm.state.value.hasPendingPolicy)
+        assertEquals(setOf("0:alpha.example", "0:beta.example"), transport.config.proxyApps.toSet())
     }
 
     @Test fun revertingDuringWriteDoesNotRestoreAnOldCheckmarkOrSkipPendingRemoval() = runBlocking {
@@ -505,13 +504,16 @@ class AppsViewModelTest {
     @Test fun selectedFirstUsesSameOrderingForNormalAndSearchLists() {
         val alpha = AppInfoModel("alpha.example", "Alpha")
         val beta = AppInfoModel("beta.example", "Beta")
-        val state = AppsUiState(allApps = listOf(alpha, beta), searchResults = listOf(alpha, beta),
+        val state = AppsUiState(appProxyEnabled = true, allApps = listOf(alpha, beta), searchResults = listOf(alpha, beta),
             proxiedApps = setOf(beta.id))
         assertEquals(listOf(beta, alpha), state.orderedApps())
         assertEquals(state.orderedApps(), state.orderedApps(state.searchResults))
         assertEquals(listOf(alpha, beta), state.searchResults)
         assertSame(state.allApps, state.copy(appSelectedFirst = false).orderedApps())
         assertSame(state.searchResults, state.copy(appSelectedFirst = false).orderedApps(state.searchResults))
+        val disabled = state.copy(appProxyEnabled = false)
+        assertSame(state.allApps, disabled.orderedApps())
+        assertSame(state.searchResults, disabled.orderedApps(state.searchResults))
         val reversed = state.copy(allApps = listOf(beta, alpha), searchResults = listOf(beta, alpha), appReverseSort = true)
         assertEquals(listOf(alpha, beta), reversed.orderedApps())
         assertEquals(reversed.orderedApps(), reversed.orderedApps(reversed.searchResults))
@@ -523,7 +525,7 @@ class AppsViewModelTest {
         val work = owner.copy(userId = "10")
         val play = AppInfoModel("google.play", "Google Play")
         val search = listOf(owner, work, play)
-        val state = AppsUiState(allApps = listOf(alpha) + search, searchResults = search,
+        val state = AppsUiState(appProxyEnabled = true, allApps = listOf(alpha) + search, searchResults = search,
             proxiedApps = setOf(alpha.id, work.id, play.id))
         assertEquals(listOf(work, play, owner), state.orderedApps(search))
         assertEquals(listOf(owner, work, play), state.copy(proxiedApps = emptySet()).orderedApps(search))
@@ -531,6 +533,21 @@ class AppsViewModelTest {
         assertEquals(listOf(owner, work, play), state.copy(appSelectedFirst = false).orderedApps(search))
         assertEquals(listOf(owner, work, play), search)
         assertTrue(state.orderedApps(emptyList()).isEmpty())
+    }
+
+    @Test fun disabledProxyKeepsSavedListsAndIgnoresToggle() = runBlocking {
+        val saved = AppProxyConfig(enabled = false, mode = "blacklist",
+            proxyApps = listOf("0:alpha.example"), bypassApps = listOf("0:beta.example"))
+        val transport = Transport().apply { config = saved }
+        val vm = model(this, transport)
+        vm.load()
+        vm.loaded()
+        assertFalse(vm.state.value.appProxyEnabled)
+        assertEquals(2, vm.state.value.allApps.size)
+        vm.toggle("0:alpha.example")
+        assertFalse(vm.state.value.hasPendingPolicy)
+        assertEquals(0, transport.writes)
+        assertEquals(saved, transport.config)
     }
 
     @Test fun continuousSearchSelectionAndDeselectionUsesLatestPolicyWithoutRefiltering() = runBlocking {
@@ -553,45 +570,47 @@ class AppsViewModelTest {
         assertFalse(vm.state.value.hasPendingPolicy)
     }
 
-    @Test fun searchStateRestoresExpandedQueryButNotClosingAnimation() {
-        val search = SearchStatus("Search").apply { searchText = "example"; current = SearchStatus.Status.EXPANDING }
-        val scope = SaverScope { true }
-        val restored = with(SearchStatus.Saver) { restore(scope.save(search)!!)!! }
-        assertEquals("example", restored.searchText)
-        assertEquals(SearchStatus.Status.EXPANDED, restored.current)
-        search.current = SearchStatus.Status.COLLAPSING
-        val closed = with(SearchStatus.Saver) { restore(scope.save(search)!!)!! }
-        assertEquals("", closed.searchText)
-        assertTrue(closed.isCollapsed())
+    @Test fun closingSearchRestoresAllAppsWithoutSavingPolicy() = runBlocking {
+        val transport = Transport()
+        val vm = model(this, transport)
+        vm.load(); vm.loaded()
+        vm.updateSearch("alpha")
+        withTimeout(5_000) { vm.state.first { !it.isFilteringApps && it.appSearchQuery == "alpha" } }
+        val policy = vm.state.value.proxiedApps
+        vm.updateSearch("")
+        val closed = withTimeout(5_000) { vm.state.first { !it.isFilteringApps && it.appSearchQuery.isEmpty() } }
+        assertEquals(listOf("alpha.example", "beta.example"), closed.allApps.map { it.packageName })
+        assertTrue(closed.searchResults.isEmpty())
+        assertEquals(policy, closed.proxiedApps)
+        assertEquals(0, transport.writes)
     }
 
-    @Test fun searchAnimationOnlyShowsResultsAfterExpansionAndRestoresContentOnCollapse() {
-        val search = SearchStatus("").apply {
-            searchText = "example"
-            current = SearchStatus.Status.EXPANDING
+    @Test fun closingSearchDoesNotAcceptAnOlderQueuedFilterResult() = runBlocking {
+        val dispatcher = ManualDispatcher()
+        val transport = Transport()
+        val vm = model(this, transport, dispatcher = dispatcher)
+        vm.load()
+        withTimeout(5_000) { vm.state.first { !it.isLoadingApps && it.masterAppList.isNotEmpty() } }
+        dispatcher.drain(); yield()
+        vm.updateSearch("alpha"); yield()
+        vm.updateSearch(""); yield()
+        dispatcher.newest(); yield(); dispatcher.drain(); yield()
+        assertEquals("", vm.state.value.appSearchQuery)
+        assertEquals(listOf("alpha.example", "beta.example"), vm.state.value.allApps.map { it.packageName })
+        assertTrue(vm.state.value.searchResults.isEmpty())
+        assertEquals(0, transport.writes)
+    }
+
+    @Test fun reopeningSearchUsesTheNewQueryWithoutChangingSelection() = runBlocking {
+        val transport = Transport()
+        val vm = model(this, transport)
+        vm.load(); vm.loaded()
+        for (query in listOf("alpha", "", "beta")) {
+            vm.updateSearch(query)
+            withTimeout(5_000) { vm.state.first { !it.isFilteringApps && it.appSearchQuery == query } }
         }
-        assertTrue(search.shouldExpand())
-        assertFalse(search.isExpand())
-        assertFalse(search.shouldCollapsed())
-        search.onAnimationComplete()
-        assertTrue(search.isExpand())
-        assertEquals("example", search.searchText)
-
-        search.current = SearchStatus.Status.COLLAPSING
-        assertTrue(search.shouldCollapsed())
-        assertFalse(search.shouldExpand())
-        search.onAnimationComplete()
-        assertTrue(search.isCollapsed())
-        assertEquals("", search.searchText)
-    }
-
-    @Test fun interruptedExpansionCompletesCurrentCollapseInsteadOfReopeningSearch() {
-        val search = SearchStatus("").apply { current = SearchStatus.Status.EXPANDING }
-        search.current = SearchStatus.Status.COLLAPSING
-        search.onAnimationComplete()
-        assertTrue(search.isCollapsed())
-        search.onAnimationComplete()
-        assertTrue(search.isCollapsed())
+        assertEquals(listOf("beta.example"), vm.state.value.searchResults.map { it.packageName })
+        assertEquals(0, transport.writes)
     }
 
     @Test fun newestFilterWinsWhenQueuedCalculationsRunInReverseOrder() = runBlocking {
