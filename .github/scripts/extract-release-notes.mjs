@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises"
 import { pathToFileURL } from "node:url"
 
-const versionPattern = String.raw`\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?`
+const versionPattern = String.raw`\d+\.\d+\.\d+(?:\.beta\d+|-[0-9A-Za-z.-]+)?`
 const releaseHeadingPatterns = [
   new RegExp(`^##\\s+版本\\s*v?(${versionPattern})(?=\\s|[（(]|$)`, "u"),
   new RegExp(`^##\\s+v(${versionPattern})(?=\\s|[（(]|$)`, "u"),

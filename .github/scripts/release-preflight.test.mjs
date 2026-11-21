@@ -26,6 +26,15 @@ test("发布预检接受匹配的 tag、模块版本和更新日志", () => {
   assert.doesNotMatch(result.notes, /上一版更新/)
 })
 
+test("点分 beta 版本可以发布且必须匹配独立日志章节", () => {
+  const result = validateRelease({ tag: "v8.6.3.beta1", moduleProp: "version=v8.6.3.beta1\n", changelog: "## 版本 8.6.3.beta1\n\n测试版更新。\n\n## 版本 8.6.3\n\n旧版。\n" })
+  assert.match(result.notes, /测试版更新/)
+  assert.doesNotMatch(result.notes, /旧版/)
+  for (const tag of ["v8.6.3.beta", "v8.6.3.beta1.extra", "v8.6.3.foo1"]) {
+    assert.throws(() => validateRelease({ tag, moduleProp: `version=${tag}\n`, changelog: "" }))
+  }
+})
+
 test("发布预检拒绝不带 v 前缀的 tag", () => {
   assert.throws(() => validateRelease({
     tag: "8.2.3",

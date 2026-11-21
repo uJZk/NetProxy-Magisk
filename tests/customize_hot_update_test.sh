@@ -63,6 +63,7 @@ write_module() {
   printf '%s\n' "$label-log" > "$target/logs/service.log"
   printf '%s\n' "$label-runtime" > "$target/runtime/config.json"
   printf '%s\n' '#!/bin/sh' \
+    'if [ "$1:$2:$3" = config:validate:module ]; then exit "${TEST_MODULE_VALIDATE:-0}"; fi' \
     'printf "%s\n" "$*" >> "$CALL_LOG"' \
     'case "$1:$2:$3" in' \
     '  __internal:worker:stop) exit "${TEST_WORKER_STOP:-0}" ;;' \
@@ -97,8 +98,34 @@ reset_modules() {
   SERVICE_STOPPED=false
   KEY_PID=""
   TEST_RUNNING=false
-  unset TEST_WORKER_STOP TEST_SERVICE_STOP TEST_CONFIG_CHECK TEST_PIDOF TEST_API_INIT
+  unset TEST_WORKER_STOP TEST_SERVICE_STOP TEST_CONFIG_CHECK TEST_PIDOF TEST_API_INIT TEST_MODULE_VALIDATE
 }
+
+test_incompatible_preserved_module() (
+  reset_modules
+  TEST_MODULE_VALIDATE=1
+  export TEST_MODULE_VALIDATE
+  if copy_user_data_locked > "$WORKDIR/menu"; then exit 1; fi
+  grep -Fq '当前模块配置不兼容' "$WORKDIR/menu"
+  assert_module "$LIVE/config/module.json" current
+  assert_module "$STAGE/config/module.json" package
+  INSTALL_MODE=nodes
+  copy_user_data_locked
+  assert_module "$STAGE/config/module.json" package
+  assert_value "$STAGE/data/catalog/default/provider.json" current-provider
+)
+
+test_real_preserved_module_validation() (
+  [ -n "$NATIVE_CTL" ] && [ -x "$NATIVE_CTL" ] || return 0
+  reset_modules
+  cp "$NATIVE_CTL" "$STAGE/bin/netproxyctl"
+  NETPROXY_DEV_ROOT="$WORKDIR/state" with_user_data_locks copy_user_data_locked
+  printf '%s\n' '{"auto_start":false,"selection":{"group_id":"default","node_tag":""},"wifi":{"enabled":false,"mode":"blacklist","blacklist":[],"whitelist":[],"proxy_on_non_wifi":true}}' > "$LIVE/config/module.json"
+  if NETPROXY_DEV_ROOT="$WORKDIR/state" with_user_data_locks copy_user_data_locked >/dev/null; then
+    printf '%s\n' '新版解析器错误接受旧 selection 配置' >&2
+    exit 1
+  fi
+)
 
 assert_value() { grep -Fxq "$2" "$1"; }
 # 参数: $1 入站文件，$2 快照来源接口名。
@@ -694,6 +721,8 @@ test_installer_entrypoints() (
 
 test_title_spacing
 test_install_choices
+test_incompatible_preserved_module
+test_real_preserved_module_validation
 test_key_events
 test_key_output_descriptor
 test_snapshot_modes

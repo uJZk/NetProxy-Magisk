@@ -313,6 +313,12 @@ copy_user_data_locked() {
     for entry in $CONFIG_ENTRIES; do
       [ -e "$LIVE_DIR/$entry" ] || return 1
     done
+    # 用本次安装包的配置解析器检查即将保留的模块设置，避免旧格式在热切换后才失效。
+    if ! NETPROXY_MODULE_DIR="$MODPATH" "$MODPATH/bin/netproxyctl" config validate module \
+      "$LIVE_DIR/config/module.json" >/dev/null 2>&1; then
+      print_error "当前模块配置不兼容；请备份完整配置后选择仅保留节点与订阅，或全新安装"
+      return 1
+    fi
   fi
   entries="$(persistent_entries)" || return 1
   snapshot="$(mktemp -d "$MODPATH/.install-state.XXXXXX")" || return 1

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { distributionRepository, prepare, releaseIdentity, sourceAsset, sourceRepository, verifyExisting, verifyPackage } from './prepare-kernelsu.mjs'
+import { distributionRepository, packageIdentity, prepare, releaseIdentity, sourceAsset, sourceRepository, verifyExisting, verifyPackage } from './prepare-kernelsu.mjs'
 
 const identity = releaseIdentity('v8.6.0', '1200')
 const bytes = Buffer.from('anonymous release fixture')
@@ -23,6 +23,13 @@ test('正式 tag 与正 int32 构建号决定两个仓库的命名', () => {
   for (const count of [0, -1, 1.5, '01', 'abc', 2147483648]) {
     assert.throws(() => releaseIdentity(identity.tag, count))
   }
+})
+
+test('主仓库可校验点分 beta 包，但不允许作为 KernelSU 正式版本', () => {
+  const beta = packageIdentity('v8.6.3.beta1', 1129)
+  assert.equal(beta.sourceName, 'NetProxy_v8.6.3.beta1_1129.zip')
+  verifyPackage('id=netproxy\nversion=v8.6.3.beta1\nversionCode=1129\n', beta)
+  assert.throws(() => releaseIdentity('v8.6.3.beta1', 1129))
 })
 
 test('源 Release 必须已正式发布，包名和摘要都有效', () => {

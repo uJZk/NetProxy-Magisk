@@ -10,7 +10,7 @@ function readModuleVersion(content) {
 }
 
 export function validateRelease({ tag, moduleProp, changelog }) {
-  if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(tag ?? "")) {
+  if (!/^v\d+\.\d+\.\d+(?:\.beta\d+|-[0-9A-Za-z.-]+)?$/u.test(tag ?? "")) {
     throw new Error(`发布 tag 必须为 v<版本号>：${tag || "(空)"}`)
   }
 

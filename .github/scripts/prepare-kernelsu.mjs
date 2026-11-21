@@ -9,6 +9,13 @@ export const distributionRepository = 'Fanju6/NetProxy-Releases'
 
 export function releaseIdentity(tag, count) {
   if (!/^v\d+\.\d+\.\d+$/.test(tag ?? '')) throw new Error('KernelSU 分发仅接受正式版本 tag')
+  return packageIdentity(tag, count)
+}
+
+// Main-repository package identity may include an explicitly published beta;
+// the separate KernelSU distribution still accepts stable tags only.
+export function packageIdentity(tag, count) {
+  if (!/^v\d+\.\d+\.\d+(?:\.beta\d+|-[0-9A-Za-z.-]+)?$/.test(tag ?? '')) throw new Error('无效的模块发布 tag')
   if (!/^[1-9]\d*$/.test(String(count)) || Number(count) > 2147483647) {
     throw new Error('构建号必须是有效的正 int32')
   }
@@ -101,7 +108,7 @@ export async function prepare(tag, directory, { readRelease = release, execute =
 async function main() {
   const [operation, tag, path, count] = process.argv.slice(2)
   if (operation === 'check') {
-    verifyPackage(run('7z', ['x', '-so', path, 'module.prop']), releaseIdentity(tag, count))
+    verifyPackage(run('7z', ['x', '-so', path, 'module.prop']), packageIdentity(tag, count))
     return
   }
   if (operation === 'prepare') {
