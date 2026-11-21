@@ -14,7 +14,6 @@ import (
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/inbound"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/logfile"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
-	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/rawconfig"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/service"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/serviceapi"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/worker"
@@ -393,7 +392,7 @@ func CheckService(ctx context.Context, options Options) error {
 	}
 	if raw.Enabled {
 		_, path, _ := rawPaths(options)
-		return rawconfig.SingBoxValidator(options.SingBoxPath, options.SingBoxDir)(ctx, path)
+		return validateRawSite(ctx, options, path)
 	}
 	if err := validateLifecycleOptions(options); err != nil {
 		return err
@@ -669,6 +668,7 @@ func restoreReloadState(_ context.Context, options Options, pid int, startedAt, 
 
 func cleanupRuntimeFiles(options Options) {
 	_ = os.Remove(paths.RuntimeConfig(options.RuntimeDir))
+	_ = os.Remove(filepath.Join(options.RuntimeDir, "hotspot-raw.json"))
 }
 
 func logService(options Options, level, event, result, format string, args ...any) {

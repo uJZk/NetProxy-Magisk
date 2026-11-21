@@ -19,9 +19,11 @@ export function checkBuild(directory) {
       for (const match of code.matchAll(/["'](\.\/mascots\/[^"']+)["']/g)) check(match[1])
     }
   }
-  check('index.html')
-  const html = readFileSync(resolve(directory, 'index.html'), 'utf8')
-  for (const match of html.matchAll(/\b(?:src|href)=["']([^"']+)["']/g)) check(match[1])
+  for (const page of ['index.html', 'hotspot.html']) {
+    check(page)
+    const html = readFileSync(resolve(directory, page), 'utf8')
+    for (const match of html.matchAll(/\b(?:src|href)=["']([^"']+)["']/g)) check(match[1])
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

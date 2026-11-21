@@ -11,6 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/hotspot"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 )
 
 func TestRawProcessUsesOnlyDownloadedConfigAndRestarts(t *testing.T) {
@@ -93,5 +97,69 @@ int main(int n, char **v) {
 	state, err := ReadServiceState(o.StateFile)
 	if err != nil || state.State != "running" {
 		t.Fatalf("old service not restored: %+v %v", state, err)
+	}
+}
+
+func TestRawSiteProjectionRemainsAvailableUntilStop(t *testing.T) {
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("C compiler unavailable")
+	}
+	root := t.TempDir()
+	o := newTestOptions(root)
+	o.SingBoxPath = filepath.Join(root, "sing-box")
+	source := `#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+int main(int n, char **v) {
+ if (n==4 && !strcmp(v[1],"check")) return access(v[3],R_OK)!=0;
+ if (n!=5 || strcmp(v[1],"run")) return 2;
+ sleep(2); FILE *in=fopen(v[4],"r"), *out=fopen("late-read","w");
+ if (!in || !out) return 3; fputs("ok",out); fclose(in); fclose(out); for (;;) pause();
+}`
+	path := filepath.Join(root, "fake.c")
+	if err := os.WriteFile(path, []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(cc, "-o", o.SingBoxPath, path).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %s: %v", out, err)
+	}
+	if err := os.MkdirAll(o.SingBoxDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, rawPath, _ := rawPaths(o)
+	if err := os.WriteFile(rawPath, []byte(`{"outbounds":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRawSettings(o, RawSettings{Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	s := hotspot.DefaultSettings()
+	s.Enabled = true
+	if err := hotspot.SaveSettings(filepath.Join(paths.New(root).Config(), "hotspot", "site.json"), s); err != nil {
+		t.Fatal(err)
+	}
+	old := rawJoinRootCgroup
+	rawJoinRootCgroup = func(int) error { return nil }
+	defer func() { rawJoinRootCgroup = old }()
+	if err := StartService(t.Context(), o); err != nil {
+		t.Fatal(err)
+	}
+	defer StopService(context.Background(), o)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(o.SingBoxDir, "late-read")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("core could not open projected config after startup")
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if err := StopService(t.Context(), o); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(o.RuntimeDir, "hotspot-raw.json")); !os.IsNotExist(err) {
+		t.Fatalf("projection remains after stop: %v", err)
 	}
 }

@@ -7,6 +7,7 @@
 本文件只收录「违反后编译和测试都不报错、但运行时会静默出错」的约束。能被 `go vet`、`tsc`、Gradle lint 或现有测试拦住的规则不写在这里。
 
 完整配置直通的实现、验证及待办见 [维护记录](docs/maintenance/passthrough.md)。
+热点 HTTPS 站点的实现、验证及待办见 [热点站点维护记录](docs/maintenance/hotspot-site.md)。
 
 ## 项目边界
 
@@ -23,6 +24,7 @@
 ## 核心契约
 
 - `netproxyctl` 是仓库唯一 Go 可执行文件；CLI 与模块 HTTP API 直接复用同一领域函数，Android 仅通过模块 HTTPS API 调用业务，当前终端 WebUI 仍调用 CLI。模块生命周期使用同一二进制的隐藏 `__internal` 入口。
+- 热点 HTTPS 站点由现有 Worker 托管，仅在完整配置直通启用时运行；`config/hotspot/site.json` 是设置事实源，私钥仅 Root 可读，普通配置读取必须脱敏。热点的 `192.2.0.1/32` 只作为 AP 附加地址，不能替换网关或删除非本模块所有的地址；崩溃恢复依赖 `/dev/netproxy/hotspot-lease.json`。页面的监听状态不代表客户端 DNS 或网络连通。
 - `__internal` 只允许 `boot` 与 `worker start|stop|run` 这类进程生命周期入口。Catalog、节点、订阅、配置、eBPF、Service API 和服务操作必须由公共命令直接调用 Go 领域处理器，不得重新建立内部命令转发层。
 - 机器接口固定使用 `schema=1` JSON。stdout 只能包含结果 JSON，日志与诊断写 stderr；字段、错误码或状态语义变化必须同步检查 Shell、Go、Android、WebUI 和测试。
 - Native 运行日志固定为 `[timestamp] [LEVEL] [component] [event] [result] [error_code] message`，成功或无错误码时写 `-`；消息必须在落盘前统一脱敏和限长。`logs show service` 的 `entries` 是 Android 展示事实源，不得回退到旧文本猜测。`logs show core` 保持 sing-box 文本，由客户端使用独立解析逻辑。
@@ -353,7 +355,7 @@ TUN 使用原生 `include_interface/exclude_interface`、CIDR、规则集与 MAC
 
 Go 生命周期控制器只将 `runtime/config.json` 传给核心。该只读文档由 `config/singbox/config.json`、内存中的 Catalog Local Provider 定义以及当前后端生成的唯一受管透明代理入站装配而成，不写入独立配置片段。
 
-完整配置直通模式只加载 `config/singbox/raw.json`，不合并上述受管配置；下载先通过同一 sing-box 检查，再原子替换，更新失败保留旧配置。来源与调度记录保存在同目录，随完整配置目录一起保留。直通配置可能不包含 Service API，`running` 只代表进程存活，不代表入站就绪。
+完整配置直通模式不合并上述受管配置；未启用热点站点时加载 `config/singbox/raw.json`，启用时在临时副本的 DNS 规则前插入热点站点规则，并用同一内核检查后运行，不能改写下载原文。下载先通过同一 sing-box 检查，再原子替换，更新失败保留旧配置。来源与调度记录保存在同目录，随完整配置目录一起保留。直通配置可能不包含 Service API，`running` 只代表进程存活，不代表入站就绪。
 
 主配置包含日志、实验特性/Clash API、DNS、用户入站、路由、HTTP Client 和 Service API。Android 的分区是 `config list` 返回的逻辑文档，不对应额外磁盘文件；完整编辑入口保留所有受核心支持的字段。运行时文件由 Go 生成并只读展示。
 

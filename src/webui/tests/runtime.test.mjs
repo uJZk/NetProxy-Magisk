@@ -24,6 +24,7 @@ test('构建检查拒绝缺失或空的页面资源及运行时角色帧', t => 
   const root = mkdtempSync(join(tmpdir(), 'netproxy-webui-'))
   t.after(() => rmSync(root, { recursive: true, force: true }))
   writeFileSync(join(root, 'index.html'), '<script src="./main.js"></script><link href="https://mui.kernelsu.org/internal/insets.css">')
+  writeFileSync(join(root, 'hotspot.html'), '<script src="./main.js"></script>')
   assert.throws(() => checkBuild(root), /ENOENT/)
   writeFileSync(join(root, 'main.js'), 'const frame="./mascots/dragon/sleep-a.svg"')
   assert.throws(() => checkBuild(root), /ENOENT/)

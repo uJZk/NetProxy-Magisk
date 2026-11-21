@@ -74,7 +74,7 @@ su -c '/data/adb/modules/netproxy/netproxyctl mode RuleAllowAds'
 
 ## 完整配置直通
 
-可以使用 URL 下载完整的 sing-box 配置并直接运行。配置由内置 sing-box 检查，运行时只加载这份文件，不生成入站或追加其他配置：
+可以使用 URL 下载完整的 sing-box 配置并直接运行。配置由内置 sing-box 检查，不生成受管入站；启用[热点 HTTPS 站点](/guide/hotspot-site)时，会在运行时副本的 DNS 规则最前面加入站点规则，原始下载文件不变：
 
 ```sh
 su -c '/data/adb/modules/netproxy/netproxyctl config raw set --interval 21600 https://example.com/config.json'

@@ -72,6 +72,12 @@ type NetworkStateReader func(context.Context) (NetworkState, error)
 // NetworkEventSource 阻塞监听网络变化，并通过 notify 合并通知控制器。
 type NetworkEventSource func(context.Context, func()) error
 
+// WatchNetworkEvents exposes the existing netlink event source to other
+// Worker-hosted services without starting another process.
+func WatchNetworkEvents(ctx context.Context, notify func()) error {
+	return defaultNetworkEventSource(ctx, notify)
+}
+
 type networkEvaluationResult struct {
 	state       NetworkState
 	readErr     error

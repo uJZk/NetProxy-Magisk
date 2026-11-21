@@ -8,6 +8,7 @@ export default defineConfig({
   base: './',
   build: {
     outDir: resolve(__dirname, '../module/webroot/netproxy'),
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: { input: { index: resolve(__dirname, 'index.html'), hotspot: resolve(__dirname, 'hotspot.html') } }
   }
 })

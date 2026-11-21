@@ -69,6 +69,13 @@ node import <文件> 会将文件中的全部节点追加到 default 本地配�
 默认命令超时为 30 秒，service start 默认 120 秒；订阅变更由各订阅下载超时控制。
 所有命令均可使用 --timeout 显式覆盖。
 配置目标：singbox/config.json 为完整主配置，singbox/dns、singbox/inbounds、singbox/route 等为分区。
+完整配置直通：
+  config raw show                              查看状态
+  config raw set [--interval 秒] [--user-agent 名称] <地址>  设置下载来源
+  config raw update [--force]                  下载并校验配置
+  config raw enable|disable                    开启或关闭直通
+  config raw clear                             删除来源和下载内容
+  更新周期默认为 86400 秒；0 表示手动更新。选项须写在地址之前。
 模块设置：module 为完整 JSON，module/wifi 与 module/auto_start 分别编辑网络策略与开机自启。
 config read 返回 revision；config apply/validate 可在目标前传 --revision <值> 检测并发修改。
 分区内容保留顶层字段，例如 {"dns":{...}}；{} 删除该分区，不影响其他字段。

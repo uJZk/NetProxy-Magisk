@@ -18,12 +18,61 @@ func (c *cli) config(ctx context.Context, args []string) error {
 	}
 	flags := newFlagSet("config")
 	revision := flags.String("revision", "", "读取配置时返回的 revision，阻止覆盖并发修改")
+	includePrivate := flags.Bool("include-private", false, "导出包含私钥的热点站点配置（仅 Root）")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
 	options := c.options
 	action := args[0]
 	positionals := flags.Args()
+	if len(positionals) > 0 && positionals[0] == "hotspot" {
+		switch action {
+		case "read":
+			if len(positionals) != 1 {
+				return usageError("config read hotspot 不接受其他参数")
+			}
+			var data map[string]string
+			var err error
+			if *includePrivate {
+				data, err = moduleapp.ReadHotspotBackup(options)
+			} else {
+				data, err = moduleapp.ReadHotspotConfig(options)
+			}
+			if err != nil {
+				return err
+			}
+			writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config.read", Message: "热点站点配置", Data: data})
+			return nil
+		case "apply", "validate":
+			if *includePrivate {
+				return usageError("--include-private 仅用于读取备份")
+			}
+			if len(positionals) != 2 {
+				return usageError("config apply hotspot 需要内容文件")
+			}
+			content, err := os.ReadFile(positionals[1])
+			if err != nil {
+				return err
+			}
+			saved, err := moduleapp.ApplyHotspotConfig(ctx, options, content, action == "validate", *revision)
+			if errors.Is(err, moduleapp.ErrConfigConflict) {
+				return &resultError{Code: "config.conflict", Message: err.Error()}
+			}
+			if err != nil {
+				return err
+			}
+			if action == "apply" {
+				if err := moduleapp.EnsureWorker(ctx, options); err != nil {
+					return fmt.Errorf("配置已保存，但后台 Worker 启动失败: %w", err)
+				}
+			}
+			writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config." + action, Message: "热点站点配置已处理", Data: map[string]string{"target": "hotspot", "revision": saved}})
+			return nil
+		}
+	}
+	if *includePrivate {
+		return usageError("--include-private 仅用于读取热点站点备份")
+	}
 	switch action {
 	case "list":
 		data, err := moduleapp.ListConfigs(options)

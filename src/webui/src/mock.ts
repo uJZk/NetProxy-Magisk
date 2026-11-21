@@ -270,6 +270,10 @@ function execute(args: string[]): CtlResult<unknown> {
     return response('config.list', '配置列表', documents)
   }
   if (command === 'config' && action === 'read') {
+    if (clean[2] === 'hotspot') return response('config.read', '热点站点配置（预览）', {
+      content: JSON.stringify({ enabled: false, domain: 'www.aabbcc.com', certificate: '', private_key: '', routes: [], dns_overrides: [], dns_block: [], dns_allow: [] }),
+      revision: 'preview', status: JSON.stringify({ state: 'unknown', message: '开发预览未连接模块' }),
+    })
     const document = [...MODULE_DOCUMENTS, ...CONFIG_DOCUMENTS].find(item => item.id === clean[2])
     if (!document) return failure('command.failed', '不支持的配置目标')
     if (document.category === 'runtime' && !runtimePrepared) return failure('command.failed', '尚未生成运行时配置')

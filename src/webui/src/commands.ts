@@ -145,7 +145,7 @@ configured_backend 是保存的入站；active_backend 仅在 ready 且 PID/API 
   },
   config: {
     overview: 'config <命令>   配置管理',
-    actions: ['list', 'read', 'check', 'validate', 'apply'],
+    actions: ['list', 'read', 'check', 'validate', 'apply', 'raw'],
     help: `config - 配置管理
 
   config list                         列出配置文件
@@ -153,6 +153,14 @@ configured_backend 是保存的入站；active_backend 仅在 ready 且 PID/API 
   config check                        检查全部配置
   config validate <目标> <内容文件>   校验配置
   config apply <目标> <内容文件>      应用配置
+  config raw show                     查看完整配置直通状态
+  config raw set [--interval 秒] [--user-agent 名称] <地址>  设置下载来源
+  config raw update [--force]         下载并校验配置
+  config raw enable|disable           开启或关闭直通
+  config raw clear                    删除来源和下载内容
+
+  更新周期默认 86400 秒，0 表示手动更新；选项须写在地址之前。
+  运行时切换直通模式会重启服务，下载或校验失败保留上一份配置。
 
   完整配置：module（module.json）、singbox/config.json、inbound
   模块分区：module/wifi、module/auto_start
@@ -201,4 +209,7 @@ export const VALUE_COMPLETIONS: Record<string, string[]> = {
   'config read': [...CONFIG_TARGETS, 'runtime/config.json'],
   'config apply': CONFIG_TARGETS,
   'config validate': CONFIG_TARGETS,
+  'config raw': ['show', 'set', 'update', 'enable', 'disable', 'clear'],
+  'config raw set': ['--interval', '--user-agent'],
+  'config raw update': ['--force'],
 }

@@ -85,9 +85,42 @@ func runWorker(ctx context.Context, args []string) error {
 		}
 		defer closer.Close()
 		options.RunServer = func(serverContext context.Context, wake <-chan struct{}) error {
-			return runAPIServer(serverContext, options.APIConfig, moduleOptions, wake, func(err error) {
+			serverContext, stopServers := context.WithCancel(serverContext)
+			defer stopServers()
+			report := func(err error) {
 				logger.Print(logfile.FormatEntry(logfile.Entry{Level: "ERROR", Component: "api", Event: "api.listen", Result: "failed", ErrorCode: "api.unavailable", Message: err.Error()}))
-			})
+			}
+			reportSite := func(err error) {
+				logger.Print(logfile.FormatEntry(logfile.Entry{Level: "ERROR", Component: "hotspot", Event: "hotspot.site", Result: "failed", ErrorCode: "hotspot.unavailable", Message: err.Error()}))
+			}
+			apiWake, siteWake := make(chan struct{}, 1), make(chan struct{}, 1)
+			hostDone := make(chan struct{})
+			go func() { defer close(hostDone); runHotspotHost(serverContext, moduleOptions, siteWake, reportSite) }()
+			fanoutDone := make(chan struct{})
+			go func() {
+				defer close(fanoutDone)
+				for {
+					select {
+					case <-serverContext.Done():
+						return
+					case _, ok := <-wake:
+						if !ok {
+							return
+						}
+						for _, target := range []chan struct{}{apiWake, siteWake} {
+							select {
+							case target <- struct{}{}:
+							default:
+							}
+						}
+					}
+				}
+			}()
+			err := runAPIServer(serverContext, options.APIConfig, moduleOptions, apiWake, report)
+			stopServers()
+			<-hostDone
+			<-fanoutDone
+			return err
 		}
 		return worker.RunProcess(ctx, options, logger)
 	case "start":

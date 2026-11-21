@@ -12,7 +12,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/hotspot"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/logfile"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/rawconfig"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/service"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/worker"
@@ -31,6 +33,66 @@ type RawState struct {
 }
 
 var rawJoinRootCgroup = ensureSingBoxRootCgroup
+
+// rawSiteCandidate projects the optional site into a temporary copy and checks
+// the exact configuration before it can be used by the core. The downloaded
+// raw.json remains the authoritative source and is never rewritten here.
+func rawSiteCandidate(ctx context.Context, o Options, source string) (string, func(), error) {
+	settings, err := hotspot.LoadProjectionSettings(filepath.Join(paths.New(o.ModuleDir).Config(), "hotspot", "site.json"))
+	if err != nil {
+		return "", nil, err
+	}
+	return rawSiteCandidateForSettings(ctx, o, source, settings)
+}
+
+func rawSiteCandidateForSettings(ctx context.Context, o Options, source string, settings hotspot.Settings) (string, func(), error) {
+	validator := rawconfig.SingBoxValidator(o.SingBoxPath, o.SingBoxDir)
+	if !settings.Enabled {
+		if err := validator(ctx, source); err != nil {
+			return "", nil, err
+		}
+		return source, func() {}, nil
+	}
+	data, err := os.ReadFile(source)
+	if err != nil {
+		return "", nil, err
+	}
+	projected, err := hotspot.ProjectConfiguredDNS(data, settings)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := os.MkdirAll(o.RuntimeDir, 0700); err != nil {
+		return "", nil, err
+	}
+	f, err := os.CreateTemp(o.RuntimeDir, ".raw-site-*.json")
+	if err != nil {
+		return "", nil, err
+	}
+	path := f.Name()
+	cleanup := func() { _ = os.Remove(path) }
+	if _, err = f.Write(projected); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", nil, err
+	}
+	if err = f.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	if err = validator(ctx, path); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return path, cleanup, nil
+}
+
+func validateRawSite(ctx context.Context, o Options, source string) error {
+	_, cleanup, err := rawSiteCandidate(ctx, o, source)
+	if cleanup != nil {
+		cleanup()
+	}
+	return err
+}
 
 func rawPaths(o Options) (string, string, string) {
 	return filepath.Join(o.SingBoxDir, "raw-settings.json"), filepath.Join(o.SingBoxDir, "raw.json"), filepath.Join(o.SingBoxDir, "raw.meta.json")
@@ -160,7 +222,7 @@ func setRawEnabledLocked(ctx context.Context, o Options, enabled bool) error {
 	}
 	if enabled {
 		_, p, _ := rawPaths(o)
-		if err = rawconfig.SingBoxValidator(o.SingBoxPath, o.SingBoxDir)(ctx, p); err != nil {
+		if err = validateRawSite(ctx, o, p); err != nil {
 			return fmt.Errorf("直通配置检查失败: %w", err)
 		}
 	}
@@ -218,7 +280,7 @@ func updateRawLocked(ctx context.Context, o Options, force bool) (rawconfig.Resu
 	if err != nil {
 		return rawconfig.Result{}, err
 	}
-	result, err := rawconfig.Update(ctx, rawconfig.Options{URL: s.URL, UserAgent: s.UserAgent, Timeout: 60 * time.Second, Interval: time.Duration(s.Interval) * time.Second, ConfigPath: p, MetaPath: m, Validate: rawconfig.SingBoxValidator(o.SingBoxPath, o.SingBoxDir), Force: force})
+	result, err := rawconfig.Update(ctx, rawconfig.Options{URL: s.URL, UserAgent: s.UserAgent, Timeout: 60 * time.Second, Interval: time.Duration(s.Interval) * time.Second, ConfigPath: p, MetaPath: m, Validate: func(ctx context.Context, candidate string) error { return validateRawSite(ctx, o, candidate) }, Force: force})
 	if err != nil || result.NotModified {
 		return result, err
 	}
@@ -296,8 +358,8 @@ func RawSchedule(ctx context.Context, o Options, now time.Time) (int64, error) {
 	return rawconfig.Nearest(m, time.Duration(s.Interval)*time.Second, now), nil
 }
 
-// startRawService starts only the user's complete configuration. Process survival
-// is reported as running; it does not claim that an arbitrary inbound is ready.
+// startRawService runs the user's complete configuration, with the optional
+// hotspot DNS projection. Survival does not imply inbound readiness.
 func startRawService(ctx context.Context, o Options) error {
 	if err := ensureLifecycleStateDir(o); err != nil {
 		return err
@@ -312,9 +374,26 @@ func startRawService(ctx context.Context, o Options) error {
 		}
 		return errors.New("已有 sing-box 进程运行，请先停止服务")
 	}
-	_, p, _ := rawPaths(o)
-	if err = rawconfig.SingBoxValidator(o.SingBoxPath, o.SingBoxDir)(ctx, p); err != nil {
+	_, source, _ := rawPaths(o)
+	p, cleanup, err := rawSiteCandidate(ctx, o, source)
+	if err != nil {
 		return fmt.Errorf("直通配置检查失败: %w", err)
+	}
+	defer cleanup()
+	projectionActive := false
+	if p != source {
+		// Keep the checked projection available until the core has stopped. A
+		// slow child may not open its configuration before the startup timer.
+		stable := filepath.Join(o.RuntimeDir, "hotspot-raw.json")
+		if err := os.Rename(p, stable); err != nil {
+			return fmt.Errorf("保存热点运行时配置: %w", err)
+		}
+		p = stable
+		defer func() {
+			if !projectionActive {
+				_ = os.Remove(stable)
+			}
+		}()
 	}
 	logPath, err := LogFile(o, "core")
 	if err != nil {
@@ -367,5 +446,6 @@ func startRawService(ctx context.Context, o Options) error {
 		<-done
 		return err
 	}
+	projectionActive = true
 	return nil
 }
