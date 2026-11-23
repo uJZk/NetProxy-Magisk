@@ -108,7 +108,7 @@ func skipActivity(args []string) bool {
 		}
 	}
 	return len(args) > 1 && ((args[0] == "service" && args[1] == "check") ||
-		(args[0] == "config" && (args[1] == "check" || args[1] == "validate")))
+		(args[0] == "config" && (args[1] == "check" || args[1] == "validate" || args[1] == "migrate-raw-module")))
 }
 
 func (c *cli) runInternal(ctx context.Context, args []string) int {

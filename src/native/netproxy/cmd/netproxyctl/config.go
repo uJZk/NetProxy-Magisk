@@ -74,6 +74,14 @@ func (c *cli) config(ctx context.Context, args []string) error {
 		return usageError("--include-private 仅用于读取热点站点备份")
 	}
 	switch action {
+	case "migrate-raw-module":
+		if len(positionals) != 2 {
+			return usageError("config migrate-raw-module 需要模块快照和直通设置文件")
+		}
+		if err := migrateRawModule(positionals[0], positionals[1]); err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config.migrate_raw_module", Message: "旧版直通模块设置已转换", Data: map[string]any{}})
 	case "list":
 		data, err := moduleapp.ListConfigs(options)
 		if err != nil {

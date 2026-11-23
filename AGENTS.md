@@ -30,7 +30,7 @@
 - Native 运行日志固定为 `[timestamp] [LEVEL] [component] [event] [result] [error_code] message`，成功或无错误码时写 `-`；消息必须在落盘前统一脱敏和限长。`logs show service` 的 `entries` 是 Android 展示事实源，不得回退到旧文本猜测。`logs show core` 保持 sing-box 文本，由客户端使用独立解析逻辑。
 - 核心日志使用原生 `log.output=stderr`（省略时同样使用内核默认 stderr），Go 将 stdout/stderr 绑定同一个 `0600` 追加文件句柄并禁用颜色；不得让内核另开日志文件或使用随 CLI 退出的管道采集。核心退出后才允许在下次启动前轮转，清空必须截断当前 inode 并删除备份，不能重命名运行中的日志，否则继承句柄会继续写入不可见文件。
 - Catalog 是持久节点事实源：每组使用 `data/catalog/<group-id>/meta.json` 与 `provider.json`。`staging/` 只存事务临时文件，不得作为持久状态读取。
-- 模块设置唯一事实源是 `config/module.json`，顶层固定为 `auto_start/wifi`，开关使用 JSON boolean，名单使用字符串数组；不读取、迁移或兼容旧格式，缺失或损坏不得回退默认配置。
+- 模块设置唯一事实源是 `config/module.json`，顶层固定为 `auto_start/wifi`，开关使用 JSON boolean，名单使用字符串数组；运行时不读取旧格式，缺失或损坏不得回退默认配置；安装时可对已启用完整配置直通的旧版 selection 做一次性快照转换。
 - 策略组定义只存放在 sing-box 原生 `config.json`；实际选择由核心与原生缓存持有。
 - 原生 `/policy-groups` 接口以核心为运行态事实源，写入须校验快照的核心实例标识。选择只调用一次核心写入并回读，不保存到 `module.json`，也不在结果未知时重试；测速响应只确认请求已被接受。停止态配置默认值不能当作运行时选中。
 - 本地资源写入在生命周期锁内恢复配置事务；运行中变更 Provider 结构时，同一事务保存原 Catalog 与生效配置。订阅提交在 Catalog 锁内短暂尝试生命周期锁，冲突返回忙。已有 Provider 的内容更新由核心监听，Worker 核对成员。
@@ -367,9 +367,9 @@ Go 生命周期控制器只将 `runtime/config.json` 传给核心。该只读文
 
 `config list` 的六个入站逻辑目标归类为 `category=inbound`；Prepare JSON 使用 `config` 路径字段与 `backend`。schema=1 字段与类别变化需同步 Shell、Go、Android、WebUI 与 tests。
 
-安装只处理当前数据布局，不迁移或清理旧版配置。保留现有数据包含整个用户配置目录（包括核心持久状态）、Catalog 与日志，但 `config/singbox/rules/remote` 始终使用本次安装包的内置规则；仅保留节点与订阅包含 Catalog 与日志；全新安装使用包内默认内容。保留模式要求对应数据完整，并在用户数据锁内用本次安装包的公开配置校验入口检查现有 `module.json`，不兼容即中止，不能在切换后才发现旧字段。热切换前重新复制并重新校验最新数据，不复制 Catalog staging 或可重建的运行时文件。
+安装不清理旧版配置；仅当完整配置直通已启用时，在持锁安装快照中移除旧版 `selection` 并严格校验其余模块设置，不修改运行中的旧配置。保留现有数据包含整个用户配置目录（包括核心持久状态）、Catalog 与日志，但 `config/singbox/rules/remote` 始终使用本次安装包的内置规则；仅保留节点与订阅包含 Catalog 与日志；全新安装使用包内默认内容。保留模式要求对应数据完整，并在用户数据锁内用本次安装包的公开配置校验入口检查现有 `module.json`，旧版直通 selection 可转换，其他不兼容即中止，不能在切换后才发现旧字段。热切换前重新复制并重新校验最新数据，不复制 Catalog staging 或可重建的运行时文件。
 
-保留全数据缺少当前 `config/module.json` 或 `config/inbound/inbound.json` 时明确失败；旧格式用户只能选择仅保留节点或全新安装，不检查版本、不转换旧格式。快照锁固定顺序为生命周期、inbound、module、sing-box 主配置，再按既有统计和 Catalog 锁执行；目录切换保留 `config/inbound/inbound.json.lock`、`config/module.json.lock`、主配置与 Catalog 锁 inode。
+保留全数据缺少当前 `config/module.json` 或 `config/inbound/inbound.json` 时明确失败；已启用完整配置直通的旧版 selection 可在快照中转换，其他旧格式不转换。快照锁固定顺序为生命周期、inbound、module、sing-box 主配置，再按既有统计和 Catalog 锁执行；目录切换保留 `config/inbound/inbound.json.lock`、`config/module.json.lock`、主配置与 Catalog 锁 inode。
 
 安装快照与目录切换使用 Go 的生命周期、配置文件和 Catalog OS 锁，分组锁先于根锁；任一锁忙立即中止。Android mksh 调用外部 `flock` 时必须显式传递锁描述符（如 `9>&9`），否则会因 `Bad file descriptor` 回退。目录切换必须保留锁文件 inode，否则等待中的 Go 命令会与新命令使用两套锁。前台准备不停止服务，后台停服或切换失败尝试恢复提交前的 Worker 与服务；原先停止的服务不得自动开启。
 

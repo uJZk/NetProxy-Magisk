@@ -313,12 +313,6 @@ copy_user_data_locked() {
     for entry in $CONFIG_ENTRIES; do
       [ -e "$LIVE_DIR/$entry" ] || return 1
     done
-    # 用本次安装包的配置解析器检查即将保留的模块设置，避免旧格式在热切换后才失效。
-    if ! NETPROXY_MODULE_DIR="$MODPATH" "$MODPATH/bin/netproxyctl" config validate module \
-      "$LIVE_DIR/config/module.json" >/dev/null 2>&1; then
-      print_error "当前模块配置不兼容；请备份完整配置后选择仅保留节点与订阅，或全新安装"
-      return 1
-    fi
   fi
   entries="$(persistent_entries)" || return 1
   snapshot="$(mktemp -d "$MODPATH/.install-state.XXXXXX")" || return 1
@@ -331,6 +325,17 @@ copy_user_data_locked() {
     else
       cp -a "$LIVE_DIR/$entry" "$snapshot/current/$entry" || { failed=true; break; }
       if [ "$entry" = config ]; then
+        # 在持锁快照上检查和转换，不修改仍在运行的旧模块。
+        if ! NETPROXY_MODULE_DIR="$MODPATH" "$MODPATH/bin/netproxyctl" config validate module \
+          "$snapshot/current/config/module.json" >/dev/null 2>&1; then
+          if ! NETPROXY_MODULE_DIR="$MODPATH" "$MODPATH/bin/netproxyctl" config migrate-raw-module \
+            "$snapshot/current/config/module.json" "$snapshot/current/config/singbox/raw-settings.json" >/dev/null 2>&1; then
+            print_error "当前模块配置不兼容；请备份完整配置后选择仅保留节点与订阅，或全新安装"
+            failed=true
+            break
+          fi
+          print_step "已转换旧版直通模式的模块设置"
+        fi
         # 用户配置可包含核心持久状态；仅内置远程规则由本次安装包提供。
         rm -rf "$snapshot/current/config/singbox/rules/remote" \
           && cp -a "$MODPATH/config/singbox/rules/remote" "$snapshot/current/config/singbox/rules/remote" \

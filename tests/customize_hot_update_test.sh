@@ -64,6 +64,7 @@ write_module() {
   printf '%s\n' "$label-runtime" > "$target/runtime/config.json"
   printf '%s\n' '#!/bin/sh' \
     'if [ "$1:$2:$3" = config:validate:module ]; then exit "${TEST_MODULE_VALIDATE:-0}"; fi' \
+    'if [ "$1:$2" = config:migrate-raw-module ]; then exit 1; fi' \
     'printf "%s\n" "$*" >> "$CALL_LOG"' \
     'case "$1:$2:$3" in' \
     '  __internal:worker:stop) exit "${TEST_WORKER_STOP:-0}" ;;' \
@@ -122,9 +123,28 @@ test_real_preserved_module_validation() (
   NETPROXY_DEV_ROOT="$WORKDIR/state" with_user_data_locks copy_user_data_locked
   printf '%s\n' '{"auto_start":false,"selection":{"group_id":"default","node_tag":""},"wifi":{"enabled":false,"mode":"blacklist","blacklist":[],"whitelist":[],"proxy_on_non_wifi":true}}' > "$LIVE/config/module.json"
   if NETPROXY_DEV_ROOT="$WORKDIR/state" with_user_data_locks copy_user_data_locked >/dev/null; then
-    printf '%s\n' '新版解析器错误接受旧 selection 配置' >&2
+    printf '%s\n' '未启用直通时不应转换旧 selection 配置' >&2
     exit 1
   fi
+  printf '%s\n' '{"enabled":true,"url":"https://example.test/config","interval":3600}' > "$LIVE/config/singbox/raw-settings.json"
+  printf '%s\n' 'raw-config-fixture' > "$LIVE/config/singbox/raw.json"
+  printf '%s\n' 'raw-metadata-fixture' > "$LIVE/config/singbox/raw.meta.json"
+  NETPROXY_DEV_ROOT="$WORKDIR/state" with_user_data_locks copy_user_data_locked
+  grep -Fq '"selection"' "$LIVE/config/module.json"
+  ! grep -Fq '"selection"' "$STAGE/config/module.json"
+  cmp "$LIVE/config/singbox/raw-settings.json" "$STAGE/config/singbox/raw-settings.json"
+  cmp "$LIVE/config/singbox/raw.json" "$STAGE/config/singbox/raw.json"
+  cmp "$LIVE/config/singbox/raw.meta.json" "$STAGE/config/singbox/raw.meta.json"
+  assert_value "$STAGE/data/catalog/default/provider.json" current-provider
+  cp "$STAGE/config/module.json" "$WORKDIR/migrated-module"
+  printf '%s\n' '{"selection":{"group_id":"default","node_tag":""},"wifi":{"mode":"off"}}' > "$LIVE/config/module.json"
+  if NETPROXY_DEV_ROOT="$WORKDIR/state" with_user_data_locks copy_user_data_locked >/dev/null; then
+    printf '%s\n' '损坏的模块设置不应转换' >&2
+    exit 1
+  fi
+  cmp "$WORKDIR/migrated-module" "$STAGE/config/module.json"
+  grep -Fq '"mode":"off"' "$LIVE/config/module.json"
+  cmp "$LIVE/config/singbox/raw.json" "$STAGE/config/singbox/raw.json"
 )
 
 assert_value() { grep -Fxq "$2" "$1"; }
