@@ -60,6 +60,7 @@ type TimerFactory func(time.Duration) Timer
 
 // Options 描述后台 Worker 的运行环境。
 type Options struct {
+	RawOnly        bool
 	Root           string
 	ProgressDir    string
 	PIDFile        string
@@ -201,11 +202,11 @@ func Run(ctx context.Context, options Options, wake <-chan struct{}, logger *log
 		}
 		now := options.Now()
 		err := configErr
-		if err == nil {
+		if err == nil && !options.RawOnly {
 			_, err = runDue(ctx, options, now, logger, retries)
 		}
 		var nearest int64
-		if err == nil {
+		if err == nil && !options.RawOnly {
 			now = options.Now()
 			var schedule catalog.ScheduleResult
 			schedule, err = subscriptionSchedule(ctx, options.Root, now.Unix(), retries)
@@ -706,7 +707,11 @@ func ReadStatus(ctx context.Context, options Options) (Status, error) {
 	if pid <= 0 || !workerProcessPID(pid) {
 		return Status{State: "stopped"}, nil
 	}
-	nearest, err := NextUpdate(ctx, options.Root, options.Now())
+	var nearest int64
+	var err error
+	if !options.RawOnly {
+		nearest, err = NextUpdate(ctx, options.Root, options.Now())
+	}
 	if err != nil {
 		return Status{}, err
 	}

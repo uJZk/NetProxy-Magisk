@@ -38,6 +38,9 @@ var rawJoinRootCgroup = ensureSingBoxRootCgroup
 // the exact configuration before it can be used by the core. The downloaded
 // raw.json remains the authoritative source and is never rewritten here.
 func rawSiteCandidate(ctx context.Context, o Options, source string) (string, func(), error) {
+	if o.RawOnly {
+		return rawSiteCandidateForSettings(ctx, o, source, hotspot.Settings{})
+	}
 	settings, err := hotspot.LoadProjectionSettings(filepath.Join(paths.New(o.ModuleDir).Config(), "hotspot", "site.json"))
 	if err != nil {
 		return "", nil, err
@@ -47,7 +50,7 @@ func rawSiteCandidate(ctx context.Context, o Options, source string) (string, fu
 
 func rawSiteCandidateForSettings(ctx context.Context, o Options, source string, settings hotspot.Settings) (string, func(), error) {
 	validator := rawconfig.SingBoxValidator(o.SingBoxPath, o.SingBoxDir)
-	if !settings.Enabled {
+	if !settings.Enabled || settings.TargetIP != "" {
 		if err := validator(ctx, source); err != nil {
 			return "", nil, err
 		}
@@ -101,7 +104,7 @@ func readRawSettings(o Options) (RawSettings, error) {
 	path, _, _ := rawPaths(o)
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return RawSettings{}, nil
+		return RawSettings{Enabled: o.RawOnly}, nil
 	}
 	if err != nil {
 		return RawSettings{}, err
@@ -112,6 +115,9 @@ func readRawSettings(o Options) (RawSettings, error) {
 	}
 	if s.Interval < 0 || s.Interval > int64((365*24*time.Hour)/time.Second) {
 		return s, errors.New("直通更新周期无效")
+	}
+	if o.RawOnly {
+		s.Enabled = true
 	}
 	return s, nil
 }
@@ -266,7 +272,17 @@ func UpdateRawConfig(ctx context.Context, o Options, force bool) (rawconfig.Resu
 	defer lock.release()
 	return updateRawLocked(ctx, o, force)
 }
-func updateRawLocked(ctx context.Context, o Options, force bool) (rawconfig.Result, error) {
+func updateRawLocked(ctx context.Context, o Options, force bool) (output rawconfig.Result, failure error) {
+	defer func() {
+		level, result, message := "INFO", "success", "配置更新完成"
+		if failure != nil {
+			level, result, message = "ERROR", "failed", "配置更新失败"
+		}
+		if o.LogDir != "" {
+			_ = logfile.AppendEntry(filepath.Join(o.LogDir, "config.log"), logfile.Entry{Level: level, Component: "config", Event: "raw.update", Result: result, Message: message})
+		}
+	}()
+
 	s, err := readRawSettings(o)
 	if err != nil {
 		return rawconfig.Result{}, err

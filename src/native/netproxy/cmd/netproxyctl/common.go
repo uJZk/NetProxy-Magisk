@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	json "encoding/json/v2"
 
@@ -40,46 +39,15 @@ func (c *cli) failData(code, message string, data any, status int) int {
 }
 
 func (c *cli) help() {
-	fmt.Fprintln(os.Stdout, `NetProxy 管理命令
 
-用法:
-  netproxyctl [--json] [--timeout <秒|时长>] service status|start|stop|restart|reload|check|toggle
-  netproxyctl [--json] [--timeout <秒|时长>] catalog list|show <分组>
-  netproxyctl [--json] [--timeout <秒|时长>] node list|show|get|export|add|import|edit|remove
-  netproxyctl [--json] [--timeout <秒|时长>] policy groups | select <策略组标签> <成员标签> | delay <策略组标签>
-  netproxyctl [--json] [--timeout <秒|时长>] sub list|show|add|edit|update|update-all|remove|history|cancel
-  netproxyctl [--json] [--timeout <秒|时长>] mode [模式名称]（不带参数列出配置中的模式）
-  netproxyctl [--json] [--timeout <秒|时长>] network evaluate --type <wifi|not_wifi> [--ssid <名称>]
-  netproxyctl [--json] [--timeout <秒|时长>] network wifi-list
-  netproxyctl [--json] [--timeout <秒|时长>] app list|mode|add|remove|enable|disable
-  netproxyctl [--json] [--timeout <秒|时长>] ebpf status [configured|all|local|shared] [--raw]
-  netproxyctl [--json] [--timeout <秒|时长>] config list|read|check|validate|apply|raw
-  netproxyctl [--json] [--timeout <秒|时长>] logs show|clear|export
-  netproxyctl [--json] [--timeout <秒|时长>] api init|start|status|access
-
-默认配置的出站模式:
-  Rule          规则
-  Proxy         代理
-  Direct        直连
-  RuleAllowAds  规则（允许广告）
-实际可选名称以 mode 返回的主配置模式列表为准。
-
-资源节点引用为 <group-id>/<tag>；策略操作使用 policy groups 返回的原始标签。
-node import <文件> 会将文件中的全部节点追加到 default 本地配置组。
-默认命令超时为 30 秒，service start 默认 120 秒；订阅变更由各订阅下载超时控制。
-所有命令均可使用 --timeout 显式覆盖。
-配置目标：singbox/config.json 为完整主配置，singbox/dns、singbox/inbounds、singbox/route 等为分区。
-完整配置直通：
-  config raw show                              查看状态
-  config raw set [--interval 秒] [--user-agent 名称] <地址>  设置下载来源
-  config raw update [--force]                  下载并校验配置
-  config raw enable|disable                    开启或关闭直通
-  config raw clear                             删除来源和下载内容
-  更新周期默认为 86400 秒；0 表示手动更新。选项须写在地址之前。
-模块设置：module 为完整 JSON，module/wifi 与 module/auto_start 分别编辑网络策略与开机自启。
-config read 返回 revision；config apply/validate 可在目标前传 --revision <值> 检测并发修改。
-分区内容保留顶层字段，例如 {"dns":{...}}；{} 删除该分区，不影响其他字段。
-stdout 只包含 schema=1 结果，运行日志写入 stderr。`)
+	fmt.Fprintln(os.Stdout, `netproxyctl [--json] [--timeout 时长]
+service status|start|stop|toggle|restart|reload|check
+config raw show|set [--interval 秒] URL|update [--force]|import 文件|clear-cache|panel
+config read [--include-private] mitm
+config read module/auto_start
+config apply [--revision 版本] mitm|module/auto_start 文件
+core status|update stable|testing|switch stable|testing
+logs show|clear core|service|mitm|config`)
 }
 
 func writeJSON(writer io.Writer, value any) {
@@ -87,16 +55,4 @@ func writeJSON(writer io.Writer, value any) {
 		return
 	}
 	_, _ = io.WriteString(writer, "\n")
-}
-
-func splitReference(reference string) (string, string, bool) {
-	group, tag, found := strings.Cut(reference, "/")
-	return group, tag, found && group != "" && tag != ""
-}
-
-func first(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return values[0]
 }

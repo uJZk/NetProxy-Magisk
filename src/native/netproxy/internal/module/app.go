@@ -27,6 +27,7 @@ import (
 
 // Options 描述模块目录、运行时目录和平台适配器路径。
 type Options struct {
+	RawOnly            bool
 	ModuleDir          string
 	ManagerVersion     string
 	ManagerVersionCode string
@@ -75,6 +76,14 @@ func NewOptions(moduleDir string) Options {
 		RequestTimeout: 8 * time.Second,
 		Telemetry:      telemetry.New(layout),
 	}
+}
+
+// StandaloneOptions configures the packaged raw-only service.
+func StandaloneOptions(root string) Options {
+	o := NewOptions(root)
+	o.RawOnly = true
+	o.Telemetry = nil
+	return o
 }
 
 // PrepareResult 描述一次运行时准备结果。
@@ -697,6 +706,7 @@ func UpdateAllSubscriptions(ctx context.Context, options Options) (result worker
 
 func workerOptions(options Options) worker.Options {
 	workerOptions := worker.Options{
+		RawOnly:             options.RawOnly,
 		Root:                options.CatalogRoot,
 		ProgressDir:         options.ProgressDir,
 		TransferContext:     options.TransferContext,

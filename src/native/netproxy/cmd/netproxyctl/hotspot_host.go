@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/hotspot"
+	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/logfile"
 	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/worker"
@@ -57,7 +58,7 @@ func hotspotHasAddress(point hotspot.AccessPoint) bool {
 	}
 	for _, a := range addrs {
 		ip, _, err := net.ParseCIDR(a.String())
-		if err == nil && ip.Equal(net.ParseIP(hotspot.DefaultSiteAddress)) {
+		if err == nil && ip.Equal(net.ParseIP(point.SiteIP())) {
 			return true
 		}
 	}
@@ -219,6 +220,13 @@ func runHotspotHostWith(ctx context.Context, options moduleapp.Options, wake <-c
 	defer retry.Stop()
 	var retryCh <-chan time.Time
 	status := func(state, message string) {
+		level := "INFO"
+		if state == "error" {
+			level = "ERROR"
+		}
+		if options.LogDir != "" {
+			_ = logfile.AppendEntry(filepath.Join(options.LogDir, "mitm.log"), logfile.Entry{Level: level, Component: "mitm", Event: "https.listener", Result: state, Message: message})
+		}
 		if err := writeHotspotStatus(options, state, message); err != nil {
 			report(err)
 		}
@@ -247,7 +255,7 @@ func runHotspotHostWith(ctx context.Context, options moduleapp.Options, wake <-c
 			retryCh = nil
 		case <-ready:
 			ready = nil
-			status("running", "热点 HTTPS 站点已监听")
+			status("running", "MITM HTTPS 服务已监听")
 		case err := <-done:
 			done = nil
 			ready = nil
@@ -300,10 +308,19 @@ func runHotspotHostWith(ctx context.Context, options moduleapp.Options, wake <-c
 				failed(err)
 				continue
 			}
-			status("stopped", "热点站点未启用或完整配置直通未开启")
+			status("stopped", "MITM 已关闭")
 			continue
 		}
-		next, err := deps.detect()
+		var next hotspot.AccessPoint
+		if s.TargetIP == "" {
+			next, err = deps.detect()
+		} else {
+			var link *net.Interface
+			link, err = net.InterfaceByName("lo")
+			if err == nil {
+				next = hotspot.AccessPoint{Name: link.Name, Index: link.Index, Address: s.TargetIP}
+			}
+		}
 		if err != nil {
 			shutdown()
 			failed(err)
@@ -330,11 +347,14 @@ func runHotspotHostWith(ctx context.Context, options moduleapp.Options, wake <-c
 			if stateErr == nil {
 				core = state.State
 			}
-			return map[string]any{"hotspot_interface": next.Name, "site_address": hotspot.DefaultSiteAddress, "core_state": core}
+			return map[string]any{"interface": next.Name, "site_address": next.SiteIP(), "core_state": core}
 		})
 		if err != nil {
 			failed(err)
 			continue
+		}
+		handler.OnMatch = func(path string) {
+			_ = logfile.AppendEntry(filepath.Join(options.LogDir, "mitm.log"), logfile.Entry{Level: "INFO", Component: "https", Event: "route.match", Result: "success", Message: path})
 		}
 		cert, err := hotspotCertificate(dir, s)
 		if err != nil {
@@ -360,9 +380,9 @@ func runHotspotHostWith(ctx context.Context, options moduleapp.Options, wake <-c
 		ready = make(chan struct{}, 1)
 		siteDone := done
 		siteReady := ready
-		status("starting", "正在启动热点 HTTPS 站点")
+		status("starting", "正在启动 MITM HTTPS 服务")
 		go func() {
-			siteDone <- deps.serve(siteCtx, net.JoinHostPort(hotspot.DefaultSiteAddress, "443"), cert, handler, func() { siteReady <- struct{}{} })
+			siteDone <- deps.serve(siteCtx, net.JoinHostPort(next.SiteIP(), "443"), cert, handler, func() { siteReady <- struct{}{} })
 		}()
 	}
 }

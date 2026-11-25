@@ -38,7 +38,7 @@ type LogSnapshot struct {
 
 // LogFile 返回用户可见日志类型对应的文件。
 func LogFile(options Options, kind string) (string, error) {
-	name := map[string]string{"service": "service.log", "core": "sing-box.log"}[kind]
+	name := map[string]string{"service": "service.log", "core": "sing-box.log", "mitm": "mitm.log", "config": "config.log"}[kind]
 	if name == "" {
 		return "", fmt.Errorf("未知日志类型: %s", kind)
 	}

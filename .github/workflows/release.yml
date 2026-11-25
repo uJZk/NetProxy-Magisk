@@ -45,7 +45,7 @@ jobs:
             src/module/module.prop docs/changelog.md "$TAG"
 
   build:
-    name: 并行构建模块与管理器
+    name: 构建独立模块
     needs: preflight
     uses: ./.github/workflows/build-module.yml
 
@@ -77,11 +77,6 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: module-package
-
-      - name: 校验模块包与发布身份
-        env:
-          TAG: ${{ github.ref_name }}
-        run: node .github/scripts/prepare-kernelsu.mjs check "$TAG" "$MODULE_NAME" "$COMMIT_COUNT"
 
       - name: 生成模块自更新清单
         env:

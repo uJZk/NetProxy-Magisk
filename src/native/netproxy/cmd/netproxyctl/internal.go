@@ -32,7 +32,7 @@ func runModuleBoot(ctx context.Context, args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	options := moduleapp.NewOptions(*root)
+	options := moduleapp.StandaloneOptions(*root)
 	options.ProgressDir = defaultProgressDir()
 	if err := moduleapp.Boot(ctx, options); err != nil {
 		return err

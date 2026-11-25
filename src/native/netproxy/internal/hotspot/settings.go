@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,14 +15,15 @@ const DefaultDomain = "www.aabbcc.com"
 // Settings is the single persistent configuration for the optional site.
 // The private key must never be included in an unauthenticated response or log.
 type Settings struct {
+	TargetIP     string        `json:"target_ip,omitempty"`
 	Enabled      bool          `json:"enabled"`
-	Domain       string        `json:"domain"`
+	Domain       string        `json:"domain,omitempty"`
 	Certificate  string        `json:"certificate"`
 	PrivateKey   string        `json:"private_key"`
 	Routes       []Route       `json:"routes"`
-	DNSOverrides []DNSOverride `json:"dns_overrides"`
-	DNSBlock     []string      `json:"dns_block"`
-	DNSAllow     []string      `json:"dns_allow"`
+	DNSOverrides []DNSOverride `json:"dns_overrides,omitempty"`
+	DNSBlock     []string      `json:"dns_block,omitempty"`
+	DNSAllow     []string      `json:"dns_allow,omitempty"`
 }
 
 // DNSOverride maps one exact domain to an IPv4 address. An empty address uses
@@ -35,17 +37,27 @@ func DefaultSettings() Settings { return Settings{Domain: DefaultDomain, Routes:
 
 func (s Settings) Validate() error {
 	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s.Domain), "."))
-	if !validDomain(domain) {
+	if s.TargetIP != "" {
+		ip, err := netip.ParseAddr(s.TargetIP)
+		if err != nil || !ip.Is4() || ip.IsMulticast() || ip.IsUnspecified() || s.TargetIP == "255.255.255.255" {
+			return errors.New("MITM 目标必须是有效的单播 IPv4 地址")
+		}
+		if s.Enabled && s.Certificate == "" {
+			return errors.New("启用 MITM 需要证书链与私钥")
+		}
+	} else if !validDomain(domain) {
 		return errors.New("站点域名无效")
 	}
 	if _, err := NewHandler(s.Routes, nil); err != nil {
 		return err
 	}
-	if _, err := normalizedOverrides(s.Domain, s.DNSOverrides); err != nil {
-		return err
-	}
-	if _, err := blockRule(s.DNSBlock, s.DNSAllow); err != nil {
-		return err
+	if s.TargetIP == "" {
+		if _, err := normalizedOverrides(s.Domain, s.DNSOverrides); err != nil {
+			return err
+		}
+		if _, err := blockRule(s.DNSBlock, s.DNSAllow); err != nil {
+			return err
+		}
 	}
 	if (s.Certificate == "") != (s.PrivateKey == "") {
 		return errors.New("证书和私钥必须同时提供")

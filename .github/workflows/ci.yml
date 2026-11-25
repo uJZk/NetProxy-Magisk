@@ -7,18 +7,15 @@ on:
     paths:
       - 'src/module/**'
       - 'src/native/netproxy/**'
-      - 'src/android/**'
       - 'src/webui/**'
       - 'tests/**'
       - '.github/workflows/ci.yml'
       - '.github/workflows/build-module.yml'
       - '.github/workflows/release.yml'
-      - '.github/workflows/publish-kernelsu.yml'
-      - '.github/workflows/update-resources.yml'
+      - '.github/workflows/core-channels.yml'
       - '.github/workflows/verify.yml'
       - '.github/actions/**'
       - '.github/scripts/**'
-      - '.github/kernelsu/**'
       - 'module.yaml'
       - '.github/resources.json'
       - '.gitattributes'
@@ -32,37 +29,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  changes:
-    name: 判断受影响组件
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      module: ${{ steps.detect.outputs.module }}
-      android: ${{ steps.detect.outputs.android }}
-    steps:
-      - name: 拉取代码
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          sparse-checkout: |
-            .github/actions/detect-changes
-            .github/scripts
-
-      - name: 检测变更范围
-        id: detect
-        uses: ./.github/actions/detect-changes
-
   build:
-    name: 并行构建模块与管理器
-    needs: changes
-    if: needs.changes.outputs.module == 'true'
     uses: ./.github/workflows/build-module.yml
-
-    with:
-      verify-android: ${{ needs.changes.outputs.android == 'true' }}
 
   publish:
     name: 发布已验证的开发包

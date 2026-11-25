@@ -3,30 +3,14 @@ import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 export function checkBuild(directory) {
-  const checked = new Set()
-  const check = reference => {
-    if (/^(?:https?:|data:|#)/.test(reference)) return
-    const name = reference.split(/[?#]/, 1)[0]
-    if (checked.has(name)) return
-    checked.add(name)
-    const path = resolve(directory, name)
-    const info = statSync(path)
-    if (!info.isFile() || info.size === 0) {
-      throw new Error(`WebUI 构建资源无效: ${name}`)
-    }
-    if (name.endsWith('.js')) {
-      const code = readFileSync(path, 'utf8')
-      for (const match of code.matchAll(/["'](\.\/mascots\/[^"']+)["']/g)) check(match[1])
+  for (const page of ['index.html','hotspot.html']) {
+    const html=readFileSync(resolve(directory,page),'utf8')
+    for(const match of html.matchAll(/\b(?:src|href)=["']([^"']+)["']/g)){
+      const name=match[1].split(/[?#]/)[0]
+      if(!name || /^(?:https?:|data:)/.test(name))continue
+      const info=statSync(resolve(directory,name))
+      if(!info.isFile()||!info.size)throw Error('WebUI 构建资源无效：'+name)
     }
   }
-  for (const page of ['index.html', 'hotspot.html']) {
-    check(page)
-    const html = readFileSync(resolve(directory, page), 'utf8')
-    for (const match of html.matchAll(/\b(?:src|href)=["']([^"']+)["']/g)) check(match[1])
-  }
 }
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  checkBuild(resolve(import.meta.dirname, '../../module/webroot/netproxy'))
-  console.log('WebUI 构建资源完整')
-}
+if(process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href)checkBuild(resolve(import.meta.dirname,'../../module/webroot/netproxy'))

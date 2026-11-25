@@ -33,7 +33,7 @@ func main() {
 
 func newCLI() *cli {
 	layout := paths.Default()
-	options := moduleapp.NewOptions(layout.Root())
+	options := moduleapp.StandaloneOptions(layout.Root())
 	options.ProgressDir = defaultProgressDir()
 	return &cli{options: options}
 }
@@ -65,50 +65,16 @@ func (c *cli) run(ctx context.Context, args []string) int {
 	switch args[0] {
 	case "service":
 		handler = c.service
-	case "catalog":
-		handler = c.catalog
-	case "node":
-		handler = c.node
-	case "policy":
-		handler = c.policy
-	case "sub":
-		handler = c.subscription
-	case "mode":
-		handler = c.mode
-	case "network":
-		handler = c.network
-	case "app":
-		handler = c.app
-	case "ebpf":
-		handler = c.ebpf
 	case "config":
 		handler = c.config
 	case "logs":
 		handler = c.logs
-	case "api":
-		handler = c.api
+	case "core":
+		handler = c.core
 	default:
-		return c.fail("usage.invalid", "未知命令组，使用 netproxyctl help 查看帮助", 2)
+		return c.fail("usage.invalid", "可用命令组：service、config、core、logs", 2)
 	}
-	status := c.runCommand(commandCtx, handler, args[1:]...)
-	if status != 2 && !skipActivity(args) {
-		stop := len(args) > 1 && args[0] == "service" && (args[1] == "stop" || args[1] == "toggle")
-		moduleapp.RecordActivity(commandCtx, c.options, !stop)
-	}
-	return status
-}
-
-func skipActivity(args []string) bool {
-	if len(args) > 1 && args[0] == "api" && args[1] != "start" {
-		return true
-	}
-	for _, arg := range args {
-		if arg == "help" || arg == "-h" || arg == "--help" {
-			return true
-		}
-	}
-	return len(args) > 1 && ((args[0] == "service" && args[1] == "check") ||
-		(args[0] == "config" && (args[1] == "check" || args[1] == "validate" || args[1] == "migrate-raw-module")))
+	return c.runCommand(commandCtx, handler, args[1:]...)
 }
 
 func (c *cli) runInternal(ctx context.Context, args []string) int {
@@ -141,9 +107,8 @@ func defaultTimeoutFor(args []string) time.Duration {
 	if len(args) > 2 && args[0] == "config" && args[1] == "raw" && (args[2] == "update" || args[2] == "enable" || args[2] == "disable" || args[2] == "clear") {
 		return serviceStartTimeout
 	}
-	if isSubscriptionMutation(args) {
-		// 每个订阅已经有自己的下载超时；外层默认时限会提前取消事务，丢失已持久化状态。
-		return 0
+	if len(args) > 1 && args[0] == "core" {
+		return 3 * time.Minute
 	}
 	if len(args) > 1 && args[0] == "service" && args[1] == "start" {
 		return serviceStartTimeout
@@ -152,18 +117,6 @@ func defaultTimeoutFor(args []string) time.Duration {
 		return serviceStartTimeout
 	}
 	return defaultCommandTimeout
-}
-
-func isSubscriptionMutation(args []string) bool {
-	if len(args) < 2 || args[0] != "sub" {
-		return false
-	}
-	switch args[1] {
-	case "add", "edit", "update", "update-all":
-		return true
-	default:
-		return false
-	}
 }
 
 func parseCommandArgs(args []string) ([]string, time.Duration, error) {

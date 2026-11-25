@@ -13,6 +13,13 @@ func (c *cli) config(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		return errors.New("缺少 config 操作")
 	}
+	if args[0] == "upgrade-snapshot" && len(args) == 1 {
+		if err := upgradeSnapshot(c.options); err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config.upgraded", Message: "设置迁移完成"})
+		return nil
+	}
 	if args[0] == "raw" {
 		return c.rawConfig(ctx, args[1:])
 	}
@@ -25,7 +32,7 @@ func (c *cli) config(ctx context.Context, args []string) error {
 	options := c.options
 	action := args[0]
 	positionals := flags.Args()
-	if len(positionals) > 0 && positionals[0] == "hotspot" {
+	if len(positionals) > 0 && (positionals[0] == "hotspot" || positionals[0] == "mitm") {
 		switch action {
 		case "read":
 			if len(positionals) != 1 {
@@ -69,6 +76,9 @@ func (c *cli) config(ctx context.Context, args []string) error {
 			writeJSON(os.Stdout, result{Schema: 1, OK: true, Code: "config." + action, Message: "热点站点配置已处理", Data: map[string]string{"target": "hotspot", "revision": saved}})
 			return nil
 		}
+	}
+	if options.RawOnly && action != "migrate-raw-module" && action != "check" && (len(positionals) == 0 || positionals[0] != "module/auto_start") {
+		return usageError("配置目标：hotspot、module/auto_start、raw")
 	}
 	if *includePrivate {
 		return usageError("--include-private 仅用于读取热点站点备份")

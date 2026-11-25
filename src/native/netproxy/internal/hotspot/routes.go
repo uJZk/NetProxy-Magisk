@@ -27,8 +27,9 @@ type compiledRoute struct {
 
 // Handler is immutable after construction and is safe for concurrent requests.
 type Handler struct {
-	routes []compiledRoute
-	status func() any
+	routes  []compiledRoute
+	status  func() any
+	OnMatch func(string)
 }
 
 func normalizePath(path string) string {
@@ -114,6 +115,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if h.OnMatch != nil {
+			h.OnMatch(best.path)
+		}
 		w.Header().Set("X-Checksum", best.checksum)
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(best.body)

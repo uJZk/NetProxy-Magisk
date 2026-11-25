@@ -1,12 +1,7 @@
-name: 并行构建模块与管理器
+name: 构建独立模块
 
 on:
   workflow_call:
-    inputs:
-      verify-android:
-        description: 是否同时执行 Android 单元测试与 Lint
-        type: boolean
-        default: false
     outputs:
       version:
         value: ${{ jobs.module.outputs.version }}
@@ -22,7 +17,7 @@ jobs:
   module:
     name: 验证并构建模块内容
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 55
     outputs:
       version: ${{ steps.pack.outputs.version }}
       commit_count: ${{ steps.pack.outputs.commit_count }}
@@ -41,78 +36,8 @@ jobs:
       - name: 保存已验证的模块内容
         uses: actions/upload-artifact@v7
         with:
-          name: module-content
-          path: ${{ steps.pack.outputs.module_name }}
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
-          overwrite: true
-
-  android:
-    name: 构建与验证 Android 管理器
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: 拉取 Android 源码与构建配置
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          filter: blob:none
-          sparse-checkout: |
-            src/android
-            src/module/config/singbox
-            .github/actions/verify-android
-            .github/scripts
-
-      - name: 构建平台辅助程序，按需执行 Android 验证
-        uses: ./.github/actions/verify-android
-        with:
-          build-manager: 'false'
-          build-platform: 'true'
-          verify: ${{ inputs.verify-android }}
-
-      - name: 保存平台辅助程序
-        uses: actions/upload-artifact@v7
-        with:
-          name: platform-binary
-          path: src/android/platform/build/dex/classes.dex
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 3
-          overwrite: true
-
-  package:
-    name: 汇合模块与管理器
-    needs: [module, android]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    env:
-      MODULE_NAME: ${{ needs.module.outputs.module_name }}
-    steps:
-      - name: 拉取打包脚本
-        uses: actions/checkout@v7
-        with:
-          sparse-checkout: .github/scripts
-
-      - name: 下载本次模块内容
-        uses: actions/download-artifact@v8
-        with:
-          name: module-content
-
-      - name: 下载平台辅助程序
-        uses: actions/download-artifact@v8
-        with:
-          name: platform-binary
-          path: platform
-
-      - name: 完成唯一模块包
-        run: sh .github/scripts/complete-module.sh "$MODULE_NAME" platform/classes.dex
-
-      - name: 保存最终模块包
-        uses: actions/upload-artifact@v7
-        with:
           name: module-package
-          path: ${{ env.MODULE_NAME }}
+          path: ${{ steps.pack.outputs.module_name }}
           if-no-files-found: error
           compression-level: 0
           retention-days: 3

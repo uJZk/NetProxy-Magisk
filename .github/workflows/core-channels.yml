@@ -1,0 +1,68 @@
+name: Build reF1nd core channels
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '15 4 * * 1'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        channel: [stable, testing]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve channel tag
+        env:
+          CHANNEL: ${{ matrix.channel }}
+        run: |
+          set -euo pipefail
+          pattern='^v[0-9]+\.[0-9]+\.[0-9]+-reF1nd$'
+          if [ "$CHANNEL" = testing ]; then pattern='^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.[0-9]+-reF1nd$'; fi
+          tag=$(git ls-remote --refs --tags https://github.com/reF1nd/sing-box.git | cut -f2 | sed 's@refs/tags/@@' | grep -E "$pattern" | sort -V | tail -1)
+          test -n "$tag"
+          echo "CORE_TAG=$tag" >> "$GITHUB_ENV"
+          git clone --depth 1 --branch "$tag" https://github.com/reF1nd/sing-box.git core-src
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: src/native/netproxy/go.mod
+      - name: Build Android arm64
+        run: |
+          bash .github/scripts/build-core.sh core-src "$CORE_TAG"
+          mkdir output
+          cp core-src/sing-box "output/sing-box-$CORE_TAG-android-arm64"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: core-${{ matrix.channel }}
+          path: output/*
+          compression-level: 0
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        channel: [stable, testing]
+    concurrency: core-release-${{ matrix.channel }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: core-${{ matrix.channel }}
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CHANNEL: ${{ matrix.channel }}
+        run: |
+          set -euo pipefail
+          file=$(ls sing-box-*-android-arm64)
+          tag=${file#sing-box-}
+          tag=${tag%-android-arm64}
+          release=core-$CHANNEL
+          if ! gh release view "$release" >/dev/null 2>&1; then
+            gh release create "$release" "$file" --target "$GITHUB_SHA" --prerelease --title "$tag" --notes "Android arm64 · reF1nd/sing-box"
+          else
+            if ! gh release view "$release" --json assets --jq '.assets[].name' | grep -Fx "$file"; then gh release upload "$release" "$file"; fi
+            gh release edit "$release" --title "$tag"
+          fi

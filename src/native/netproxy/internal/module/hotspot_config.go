@@ -92,6 +92,9 @@ func ApplyHotspotConfig(ctx context.Context, o Options, content []byte, validate
 	if err := json.Unmarshal(content, &next); err != nil {
 		return "", fmt.Errorf("站点设置格式错误: %w", err)
 	}
+	if o.RawOnly && next.TargetIP == "" {
+		return "", errors.New("缺少 MITM 目标 IPv4 地址")
+	}
 	if next.PrivateKey == "" && next.Certificate != "" && next.Certificate == old.Certificate {
 		next.PrivateKey = old.PrivateKey
 	}
@@ -110,7 +113,7 @@ func ApplyHotspotConfig(ctx context.Context, o Options, content []byte, validate
 		return "", err
 	}
 	revision := configRevision(encoded)
-	if raw.Enabled {
+	if !o.RawOnly && raw.Enabled && (next.TargetIP == "" || old.Enabled && old.TargetIP == "") {
 		_, source, _ := rawPaths(o)
 		_, cleanup, err := rawSiteCandidateForSettings(ctx, o, source, next)
 		if cleanup != nil {
@@ -144,7 +147,7 @@ func ApplyHotspotConfig(ctx context.Context, o Options, content []byte, validate
 		}
 		return writeRawFile(path, previous)
 	}
-	if raw.Enabled {
+	if !o.RawOnly && raw.Enabled && (next.TargetIP == "" || old.Enabled && old.TargetIP == "") {
 		state, err := ReadServiceState(o.StateFile)
 		if err != nil {
 			return "", errors.Join(err, rollback())

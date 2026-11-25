@@ -1,3 +1,9 @@
+# 独立模块维护指南
+
+当前发布范围以 README.md 和 .github/scripts/stage-module.sh 为准。WebUI、CLI、后台与发布只服务于原始配置、MITM、核心渠道和日志。实施时遵循 docs/maintenance/engineering.md；本项目核心构建来自 reF1nd 的标签。
+
+下列历史架构记录适用于旧版本的数据迁移和保留的内部库。受管节点、订阅、Android 管理器、遥测及旧终端界面已退出当前模块的产品范围。
+
 # NetProxy Agent Guide
 
 本文件是仓库内自动化编码代理的根级约束，也是跨组件架构的唯一权威说明。开始修改前先阅读与任务相关的源码和本文件对应章节；Android 内部分层见 [src/android/ARCHITECTURE.md](src/android/ARCHITECTURE.md)，贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。

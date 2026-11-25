@@ -33,6 +33,19 @@ runs:
           ${{ runner.os }}-${{ runner.arch }}-native-${{ hashFiles('src/native/netproxy/go.sum') }}-
           ${{ runner.os }}-${{ runner.arch }}-native-
 
+    - name: 构建模块内置核心
+      shell: bash
+      run: |
+        mkdir -p src/module/bin src/module/cores
+        tag=$(jq -r .singBox.currentVersion .github/resources.json)
+        git clone --depth 1 --branch "$tag" https://github.com/reF1nd/sing-box.git "$RUNNER_TEMP/core-source"
+        bash .github/scripts/build-core.sh "$RUNNER_TEMP/core-source" "$tag"
+        install -m 0755 "$RUNNER_TEMP/core-source/sing-box" src/module/bin/sing-box
+        stable=$(jq -r .singBox.stableVersion .github/resources.json)
+        git clone --depth 1 --branch "$stable" https://github.com/reF1nd/sing-box.git "$RUNNER_TEMP/core-stable"
+        bash .github/scripts/build-core.sh "$RUNNER_TEMP/core-stable" "$stable"
+        install -m 0755 "$RUNNER_TEMP/core-stable/sing-box" src/module/cores/stable
+
     - name: 配置 Node
       uses: actions/setup-node@v7
       with:
@@ -46,7 +59,8 @@ runs:
         NETPROXY_CI_BUILD_DIR: ${{ runner.temp }}/netproxy-build
       run: |
         set -euo pipefail
-        sh tests/ci_verify.sh
+        mkdir -p "$NETPROXY_CI_BUILD_DIR"
+        (cd src/native/netproxy && go test ./... && go vet ./... && CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o "$NETPROXY_CI_BUILD_DIR/netproxyctl-android" ./cmd/netproxyctl)
         install -m 0755 "$NETPROXY_CI_BUILD_DIR/netproxyctl-android" src/module/bin/netproxyctl
 
     - name: 构建 WebUI（产物 → src/module/webroot/netproxy）
@@ -68,4 +82,5 @@ runs:
         COMMIT_COUNT: ${{ steps.meta.outputs.commit_count }}
       run: |
         sed -i "s/^versionCode=.*/versionCode=$COMMIT_COUNT/" src/module/module.prop
-        sh .github/scripts/package-module.sh src/module "$GITHUB_WORKSPACE" "$MODULE_NAME"
+        sh .github/scripts/stage-module.sh src/module "$RUNNER_TEMP/module"
+        sh .github/scripts/package-module.sh "$RUNNER_TEMP/module" "$GITHUB_WORKSPACE" "$MODULE_NAME"

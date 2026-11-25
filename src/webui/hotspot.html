@@ -1,12 +1,2 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="color-scheme" content="dark light"><title>热点站点</title></head>
-<body><main class="page">
-<header><a href="../index.html">← 返回控制中心</a><h1>热点站点</h1><p>为连接安卓热点的设备提供 HTTPS 接口。需先启用完整配置直通，且热点 DNS 请求须经过 sing-box。</p></header>
-<div id="message" role="status" aria-live="polite"></div>
-<form id="settings">
-<section><h2>站点</h2><label class="switch"><input id="enabled" type="checkbox"> 启用热点站点</label><p>默认地址 <code>192.2.0.1</code>；会作为附加地址加入热点接口。</p><label>站点域名<input id="domain" required maxlength="253" autocomplete="off"></label><p>未提供证书时自动生成自签证书，客户端需要信任该证书。</p><label>证书链 PEM<textarea id="cert" rows="4" spellcheck="false"></textarea></label><label>私钥 PEM<textarea id="key" rows="4" spellcheck="false" placeholder="留空保留现有私钥；清空证书则恢复自签证书"></textarea></label></section>
-<section><h2>域名解析</h2><p>地址留空时使用站点地址；仅对经过 sing-box 的 DNS 请求生效。</p><div id="dns"></div><button type="button" id="add-dns">添加解析</button><label>DNS 黑名单（每行一条，支持 * 和 ?）<textarea id="dns-block" rows="4" spellcheck="false"></textarea></label><label>黑名单例外（每行一个完整域名）<textarea id="dns-allow" rows="3" spellcheck="false"></textarea></label><p>自定义解析优先于黑名单；例外只影响黑名单，不会绕过 raw 配置原有规则。</p></section>
-<section><h2>HTTPS 自定义接口</h2><p>设置路径及固定 JSON 响应；最多 8 条。内置 /、/ping、/status、/headers、/echo。</p><div id="routes"></div><button type="button" id="add-route">添加接口</button></section>
-<section><h2>配置备份</h2><p>导出的 JSON 包含用户提供的证书私钥，请妥善保管。导入后需点击保存才会生效。</p><button id="export" type="button">导出备份</button> <label>导入备份<input id="import" type="file" accept="application/json,.json"></label></section>
-<footer><button id="save" type="submit" disabled>保存设置</button><button id="reload" type="button">重新读取</button></footer>
-</form></main><script type="module" src="/src/hotspot.ts"></script></body></html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=./index.html#mitm"><title>MITM</title></head><body><a href="./index.html#mitm">打开 MITM 设置</a></body></html>

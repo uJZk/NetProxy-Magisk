@@ -233,6 +233,42 @@ func logConfigApply(options Options, validateOnly bool, err error) {
 // ApplyConfigContent 通过候选文件、校验和原子替换应用原始配置内容。
 func ApplyConfigContent(ctx context.Context, options Options, target string, replacement []byte, validateOnly bool, expectedRevision string) (revision string, err error) {
 	defer func() { logConfigApply(options, validateOnly, err) }()
+	if options.RawOnly && target == "module/auto_start" {
+		lock, err := waitLifecycleLock(ctx, options.StateFile)
+		if err != nil {
+			return "", err
+		}
+		defer lock.release()
+		editor, err := moduleconfig.Lock(ctx, options.ModuleConfig)
+		if err != nil {
+			return "", err
+		}
+		defer editor.Release()
+		current, err := os.ReadFile(options.ModuleConfig)
+		if err != nil {
+			return "", err
+		}
+		fragment, err := configObject(replacement)
+		if err != nil {
+			return "", err
+		}
+		field := strings.TrimSpace(string(fragment["auto_start"]))
+		if field != "true" && field != "false" {
+			return "", errors.New("auto_start 需要布尔值")
+		}
+		updated, revision, err := prepareConfigEdit(current, replacement, "auto_start", expectedRevision)
+		if err != nil {
+			return "", err
+		}
+		if _, err = moduleconfig.ParseModule(updated); err != nil {
+			return "", err
+		}
+		if !validateOnly {
+			err = writeRawFile(options.ModuleConfig, updated)
+		}
+		return revision, err
+	}
+
 	destination, err := ResolveConfig(options, target)
 	if err != nil {
 		return "", err

@@ -1,13 +1,12 @@
 import { exec } from 'kernelsu'
 import { decodeCtlResult, type CtlResult, type ExecResult } from './contract'
-import { mockCtl } from './mock'
 
 const CTL = '/data/adb/modules/netproxy/netproxyctl'
 const DEFAULT_TIMEOUT_MS = 30_000
 declare const ksu: any
 const browserWindow = typeof window === 'undefined' ? undefined : (window as any)
 export const inKsu = typeof ksu !== 'undefined' || !!browserWindow?.ksu || !!browserWindow?.KSU
-const useMock = import.meta.env.DEV && !inKsu
+
 
 const shq = (v: string) => `'${v.replace(/'/g, `'"'"'`)}'`
 
@@ -18,7 +17,6 @@ async function run(cmd: string): Promise<ExecResult> {
 }
 
 async function runCtl(args: string[]): Promise<ExecResult> {
-  if (useMock) return mockCtl(args)
   return run([CTL, ...args].map(shq).join(' '))
 }
 
@@ -31,23 +29,3 @@ export async function ctlJson<T>(args: string[], timeoutMs = DEFAULT_TIMEOUT_MS)
 }
 
 export const shell = run
-
-interface CatalogCompletion {
-  id: string
-  type: string
-}
-
-function isCatalogCompletion(value: unknown): value is CatalogCompletion {
-  if (typeof value !== 'object' || value === null) return false
-  const item = value as Record<string, unknown>
-  return typeof item.id === 'string' && item.id.length > 0 && typeof item.type === 'string'
-}
-
-export async function completions() {
-  const result = await ctlJson<unknown[]>(['catalog', 'list'])
-  const groups = result.ok && Array.isArray(result.data) ? result.data.filter(isCatalogCompletion) : []
-  return {
-    groups: groups.map(group => group.id),
-    subs: groups.filter(group => group.type === 'subscription').map(group => group.id)
-  }
-}

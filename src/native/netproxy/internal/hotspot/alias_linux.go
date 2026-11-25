@@ -20,7 +20,7 @@ func AddSiteAddress(point AccessPoint) (bool, error) {
 	if link.Attrs().Name != point.Name {
 		return false, fmt.Errorf("热点接口已变化")
 	}
-	address, err := netlink.ParseAddr(DefaultSiteAddress + "/32")
+	address, err := netlink.ParseAddr(point.SiteIP() + "/32")
 	if err != nil {
 		return false, err
 	}
@@ -34,13 +34,13 @@ func AddSiteAddress(point AccessPoint) (bool, error) {
 			return false, err
 		}
 		for _, existing := range assigned {
-			if existing.IPNet == nil || !existing.IP.Equal(net.ParseIP(DefaultSiteAddress)) {
+			if existing.IPNet == nil || !existing.IP.Equal(net.ParseIP(point.SiteIP())) {
 				continue
 			}
 			if candidate.Attrs().Index == point.Index && existing.IPNet.String() == address.IPNet.String() {
 				return false, nil
 			}
-			return false, fmt.Errorf("地址 %s 已分配给接口 %s，无法使用", DefaultSiteAddress, candidate.Attrs().Name)
+			return false, fmt.Errorf("地址 %s 已分配给接口 %s，无法使用", point.SiteIP(), candidate.Attrs().Name)
 		}
 	}
 	if err := netlink.AddrAdd(link, address); err != nil {
@@ -61,7 +61,7 @@ func RemoveSiteAddress(point AccessPoint, owned bool) error {
 	if link.Attrs().Name != point.Name {
 		return fmt.Errorf("热点接口已变化，未删除地址")
 	}
-	address, err := netlink.ParseAddr(DefaultSiteAddress + "/32")
+	address, err := netlink.ParseAddr(point.SiteIP() + "/32")
 	if err != nil {
 		return err
 	}

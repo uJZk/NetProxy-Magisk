@@ -26,3 +26,8 @@ Third-party components and adapted code include:
 Additional build and runtime dependencies retain their respective copyrights
 and licenses. Dependency coordinates are declared in the Go modules, npm
 manifests, and src/android/gradle/libs.versions.toml.
+
+
+The independent WebUI uses Vue, Vant, Varlet, json-render and yaml.
+The independent module and core channel builds are maintained in
+https://github.com/uJZk/NetProxy-Magisk .

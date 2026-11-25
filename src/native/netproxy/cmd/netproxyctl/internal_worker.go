@@ -13,7 +13,7 @@ import (
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/logfile"
 	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/paths"
-	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/service"
+
 	"github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/worker"
 )
 
@@ -85,42 +85,10 @@ func runWorker(ctx context.Context, args []string) error {
 		}
 		defer closer.Close()
 		options.RunServer = func(serverContext context.Context, wake <-chan struct{}) error {
-			serverContext, stopServers := context.WithCancel(serverContext)
-			defer stopServers()
-			report := func(err error) {
-				logger.Print(logfile.FormatEntry(logfile.Entry{Level: "ERROR", Component: "api", Event: "api.listen", Result: "failed", ErrorCode: "api.unavailable", Message: err.Error()}))
-			}
-			reportSite := func(err error) {
-				logger.Print(logfile.FormatEntry(logfile.Entry{Level: "ERROR", Component: "hotspot", Event: "hotspot.site", Result: "failed", ErrorCode: "hotspot.unavailable", Message: err.Error()}))
-			}
-			apiWake, siteWake := make(chan struct{}, 1), make(chan struct{}, 1)
-			hostDone := make(chan struct{})
-			go func() { defer close(hostDone); runHotspotHost(serverContext, moduleOptions, siteWake, reportSite) }()
-			fanoutDone := make(chan struct{})
-			go func() {
-				defer close(fanoutDone)
-				for {
-					select {
-					case <-serverContext.Done():
-						return
-					case _, ok := <-wake:
-						if !ok {
-							return
-						}
-						for _, target := range []chan struct{}{apiWake, siteWake} {
-							select {
-							case target <- struct{}{}:
-							default:
-							}
-						}
-					}
-				}
-			}()
-			err := runAPIServer(serverContext, options.APIConfig, moduleOptions, apiWake, report)
-			stopServers()
-			<-hostDone
-			<-fanoutDone
-			return err
+			runHotspotHost(serverContext, moduleOptions, wake, func(err error) {
+				logger.Print(logfile.FormatEntry(logfile.Entry{Level: "ERROR", Component: "mitm", Event: "mitm.listen", Result: "failed", Message: err.Error()}))
+			})
+			return nil
 		}
 		return worker.RunProcess(ctx, options, logger)
 	case "start":
@@ -280,7 +248,7 @@ func configureWorkerCallbacks(options *worker.Options, moduleDir, catalogRoot, m
 		return moduleapp.Options{}
 	}
 
-	moduleOptions := moduleapp.NewOptions(moduleDir)
+	moduleOptions := moduleapp.StandaloneOptions(moduleDir)
 	moduleOptions.CatalogRoot = catalogRoot
 	moduleOptions.ModuleConfig = moduleConfig
 	moduleOptions.SingBoxPath = singBox
@@ -288,38 +256,9 @@ func configureWorkerCallbacks(options *worker.Options, moduleDir, catalogRoot, m
 	moduleOptions.ServiceSecret = secret
 	moduleOptions.ProgressDir = progressDir
 	moduleOptions.WorkerPIDFile = pidFile
-	options.NetworkWatchEnabled = true
-	options.GuardProviderCommit = moduleapp.ProviderCommitGuard(moduleOptions)
-	if moduleOptions.Telemetry != nil {
-		options.Telemetry = moduleOptions.Telemetry
-		options.CoreRunning = func() bool {
-			state, err := moduleapp.ReadServiceState(moduleOptions.StateFile)
-			return err == nil && state.State == "ready" && state.PID > 0 && service.FindProcess(options.SingBoxPath, int(state.PID)) == int(state.PID)
-		}
-	}
-	options.SyncCatalog = func(ctx context.Context, groupID string, structureChanged bool) (string, bool, error) {
-		raw, err := moduleapp.RawEnabled(moduleOptions)
-		if err != nil {
-			return "", false, err
-		}
-		if raw {
-			return "", false, nil
-		}
-		return moduleapp.SyncCatalog(ctx, moduleOptions, groupID, structureChanged)
-	}
+	options.RawOnly = true
 	options.RawSchedule = func(ctx context.Context, now time.Time) (int64, error) {
 		return moduleapp.RawSchedule(ctx, moduleOptions, now)
-	}
-	options.NetworkEvaluate = func(ctx context.Context, networkType, ssid string) error {
-		raw, err := moduleapp.RawEnabled(moduleOptions)
-		if err != nil {
-			return err
-		}
-		if raw {
-			return nil
-		}
-		_, err = moduleapp.EvaluateNetwork(ctx, moduleOptions, networkType, ssid)
-		return err
 	}
 	return moduleOptions
 }

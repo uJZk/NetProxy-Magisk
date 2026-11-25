@@ -15,6 +15,9 @@ func (c *cli) rawConfig(ctx context.Context, args []string) error {
 		args = []string{"show"}
 	}
 	action := args[0]
+	if c.options.RawOnly && (action == "disable" || action == "clear") {
+		return usageError("独立模块仅运行原始配置；清除下载缓存请用 clear-cache")
+	}
 	flags := newFlagSet("config raw " + action)
 	interval := flags.Int64("interval", 86400, "更新周期，单位秒；0 表示手动更新")
 	agent := flags.String("user-agent", "", "下载 User-Agent")
@@ -39,6 +42,29 @@ func (c *cli) rawConfig(ctx context.Context, args []string) error {
 			return err
 		}
 		data = state
+	case "panel":
+		if len(pos) != 0 {
+			return usageError("panel 不接受参数")
+		}
+		address, err := moduleapp.RawPanelURL(c.options)
+		if err != nil {
+			return err
+		}
+		data = map[string]string{"url": address}
+	case "import":
+		if len(pos) != 1 {
+			return usageError("import 需要文件路径")
+		}
+		if err := moduleapp.ImportRawFile(ctx, c.options, pos[0]); err != nil {
+			return err
+		}
+	case "clear-cache":
+		if len(pos) != 0 {
+			return usageError("clear-cache 不接受参数")
+		}
+		if err := moduleapp.ClearRawCache(ctx, c.options); err != nil {
+			return err
+		}
 	case "set":
 		if len(pos) != 1 {
 			return errors.New("set 需要一个配置地址")

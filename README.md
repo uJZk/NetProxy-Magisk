@@ -1,133 +1,39 @@
-<p align="center">
-  <img src="docs/public/N.svg" alt="NetProxy Logo" width="120" />
-</p>
+# NetProxy
 
-<h1 align="center">NetProxy</h1>
+面向 Android arm64 的独立 sing-box 模块，支持 Magisk、KernelSU 与 APatch。用户提供一份完整的 sing-box 配置，模块负责校验、运行及定时更新。
 
-<p align="center">
-  <strong>Android 系统级 sing-box 透明代理模块</strong><br>
-  eBPF / TUN · 节点与订阅 · 分应用代理 · 共享网络
-</p>
+## 使用
 
-<p align="center">
-  <a href="https://github.com/Fanju6/NetProxy-Magisk/releases">
-    <img src="https://img.shields.io/github/v/release/Fanju6/NetProxy-Magisk?style=flat-square&label=Release&color=blue" alt="Latest Release" />
-  </a>
-  <a href="https://github.com/Fanju6/NetProxy-Magisk/releases">
-    <img src="https://img.shields.io/github/downloads/Fanju6/NetProxy-Magisk/total?style=flat-square&color=green" alt="Downloads" />
-  </a>
-  <img src="https://img.shields.io/badge/Core-sing--box-blueviolet?style=flat-square" alt="sing-box Core" />
-</p>
+打开模块 WebUI，在 **sing-box 配置** 中填写 URL 或导入本地文件，再打开总开关。开机自启独立设置。更新间隔以秒为单位，设为 0 可改为手动更新。清除下载缓存会移除 HTTP 缓存校验信息，保留当前配置和来源。
 
-<p align="center">
-  <a href="https://github.com/Fanju6/NetProxy-Magisk/releases">下载模块与管理器</a> ·
-  <a href="https://www.netproxy.store/">使用文档</a> ·
-  <a href="src/android/">管理器源码</a> ·
-  <a href="https://t.me/NetProxy_Magisk">Telegram</a>
-</p>
+**sing-box 面板** 从原始配置读取 Service API 的 dashboard 或 Clash API 的 external_ui，使用对应监听地址打开。未配置时入口置灰。下载前端资源的 URL 仅供核心下载。
 
-<p align="center">
-  中文 | <a href="README_EN.md">English</a>
-</p>
+**MITM** 在指定 IPv4 地址提供 TLS 自定义 JSON 接口。启用时需提供匹配的证书链和私钥。客户端必须信任该证书，证书应覆盖实际访问的域名。设备匹配、目标域名、DNS 映射及黑白名单均在 sing-box 原始配置中管理。模块在回环接口配置目标地址，停用后清理本实例添加的地址。
 
----
+MITM 导出为本项目 JSON 备份，包含私钥。导入支持本项目 JSON（含旧热点站点格式）及 ESP32 Repeater v1 YAML。ESP32 的证书和接口按段导入，缺省段保留。Wi-Fi、DNS 和站点域名仅属于参照格式。导入后可检查内容并保存。
 
-## 项目简介
+**日志** 分为模块服务、配置更新、sing-box 与 MITM。核心日志级别由原始配置中的 `log.level` 控制。
 
-NetProxy 是面向已 Root Android 设备的系统级透明代理模块，支持 **Magisk、KernelSU 与 APatch**。使用 sing-box，通过 eBPF 或 TUN + auto_redirect 接管流量。
+## 核心渠道
 
-日常操作可使用随模块提供的 Android 管理器，也可通过终端式模块 WebUI、CLI 或 sing-box Dashboard 管理。节点与订阅在服务停止时仍可浏览和编辑。
+正式版与测试版由本仓库的 Core Channels 工作流从 reF1nd/sing-box 的对应标签构建。安装包内置两个渠道，可以离线切换。更新下载指定渠道到本地，校验发布摘要、架构及版本。切换会先用候选核心校验当前配置，正在运行的服务会重启，启动失败时尝试恢复原核心。首次下载需要本仓库已生成对应的渠道 Release。
 
-## 界面预览
+## CLI
 
-<div align="center">
-  <img src="docs/public/Screenshot.jpg" width="60%" alt="NetProxy Android 管理器界面预览" />
-</div>
+在 root Shell 中运行以下命令。命令路径为 /data/adb/modules/netproxy/netproxyctl。
 
-## 主要功能
-
-- **透明代理**：eBPF 或 TUN 接管 TCP、UDP 与 DNS，支持热点和 USB 共享网络。
-- **节点与订阅**：导入节点链接、节点文本、Clash YAML 和 sing-box JSON；支持订阅筛选、请求头、流量信息与自动更新。
-- **节点选择与测速**：手动选择或自动优选，服务停止时也可测速。
-- **分应用代理**：黑名单 / 白名单，按 Android 用户分别配置，支持应用分身。
-- **网络策略**：规则、代理、直连与规则（允许广告）模式，按 Wi-Fi 名称和实际出口自动切换。
-- **配置与诊断**：编辑 sing-box 配置、本地规则，查看运行时配置与日志，导出脱敏诊断包。
-
-## 安装与开始使用
-
-运行环境为 `arm64-v8a` Android 设备与 Magisk、KernelSU 或 APatch，使用 Root 权限接管流量。
-
-默认使用 eBPF，可在“设置 → 入站设置”中选择 TUN。设备能力要求与安装选项见[安装与升级](https://www.netproxy.store/guide/installation)。
-
-1. 从 [Releases](https://github.com/Fanju6/NetProxy-Magisk/releases) 下载 `NetProxy_<版本>_<构建号>.zip`，内含模块和 Android 管理器。
-2. 在 Root 管理器中刷入，按提示选择数据保留方式及是否安装管理器；等待安装完成。
-3. 打开 Android 管理器，自动连接模块，在“节点”页导入节点，或在“订阅”页添加订阅。
-4. 在“节点”页选择分组与自动 / 手动节点，返回“仪表盘”开启服务。
-
-服务默认手动启动，开机自启可在“设置”中开启。首次配置参阅[快速开始](https://www.netproxy.store/guide/quick-start)。
-
-## 使用文档
-
-| 内容 | 文档 |
-|---|---|
-| 安装与首次配置 | [安装与升级](https://www.netproxy.store/guide/installation) · [快速开始](https://www.netproxy.store/guide/quick-start) |
-| 节点、订阅与测速 | [节点与订阅](https://www.netproxy.store/guide/nodes-subscriptions) |
-| 入站、分应用与共享网络 | [入站配置](https://www.netproxy.store/config/inbound) · [eBPF](https://www.netproxy.store/config/ebpf) · [TUN](https://www.netproxy.store/config/tun) |
-| 网络自动切换 | [Wi-Fi 自动策略](https://www.netproxy.store/guide/wifi-policy) |
-| 路由、DNS 与策略组 | [配置参考](https://www.netproxy.store/config/singbox) · [策略分组](https://www.netproxy.store/config/policy-groups) |
-| 终端、面板与第三方客户端 | [CLI](https://www.netproxy.store/guide/cli) · [控制面板与 API](https://www.netproxy.store/guide/control-panel) |
-| 故障排查与问题反馈 | [常见问题与诊断](https://www.netproxy.store/guide/faq) |
-
-[更新日志](https://www.netproxy.store/changelog) · [隐私政策](https://www.netproxy.store/privacy)
-
-## 奶屁伙伴
-
-<p align="center">
-  <a href="https://www.netproxy.store/mascot/dragon"><img src="docs/public/mascots/dragon/base.svg" width="144" alt="薄荷色像素奶屁龙" /></a>
-  <a href="https://www.netproxy.store/mascot/niang"><img src="docs/public/mascots/niang/stickers/16-leave-it.png" width="144" alt="长发蓝蝴蝶结的奶屁娘：交给我" /></a>
-</p>
-
-**奶屁龙**，通路工坊的开路员。爱挖洞，也爱打盹，偶尔会把出口挖到饼干柜里。
-
-**奶屁娘**，通路工坊的主人。讲究、有点傲娇，嘴上问着“日志呢？”，手里已经递来一杯热饮。
-
-[工坊故事](https://www.netproxy.store/mascot/) · [表情包](https://www.netproxy.store/mascot/stickers) · [股东名册](https://www.netproxy.store/mascot/supporters)
-
-## 源码结构
-
-```text
-src/module/          模块安装与运行文件
-src/native/netproxy/ Go 原生组件
-src/webui/           终端式模块 WebUI
-src/android/         Android 管理器
-docs/                用户文档站
-tests/               契约与回归测试
+```sh
+netproxyctl service status
+netproxyctl config raw import /sdcard/Download/config.json
+netproxyctl config raw set --interval 86400 https://example.org/sing-box.json
+netproxyctl config raw update
+netproxyctl service start
+netproxyctl config raw panel
+netproxyctl logs show core
+netproxyctl core update stable
+netproxyctl core switch stable
 ```
 
-开发流程与验证方法见[贡献指南](CONTRIBUTING.md)，架构和跨组件契约见 [AGENTS.md](AGENTS.md)，管理器构建见 [Android 说明](src/android/README.md)。
+安装包通过本仓库的 build-module 工作流构建。Go 源码位于 src/native/netproxy，移动端 WebUI 位于 src/webui，模块暂存清单见 .github/scripts/stage-module.sh。升级使用管理器暂存目录，重启生效。
 
-## 鸣谢
-
-| 项目 | 用途 |
-|------|------|
-| [reF1nd/sing-box](https://github.com/reF1nd/sing-box) | 当前代理核心 |
-| [SagerNet/sing-box](https://github.com/SagerNet/sing-box) | 上游 sing-box 项目 |
-| [Proxylink](https://github.com/Fanju6/Proxylink) | NetProxy 内部节点转换能力的原始项目 |
-| [AsteriskNG](https://github.com/Asterisk4Magisk/AsteriskNG) | Android eBPF 实现参考 |
-| [v2rayNG](https://github.com/2dust/v2rayNG) | 节点解析实现参考 |
-
-同时感谢曾为早期版本提供核心能力或实现参考的 [CHIZI-0618/sing-box](https://github.com/CHIZI-0618/sing-box)、[Xray-core](https://github.com/XTLS/Xray-core)、[AndroidTProxyShell](https://github.com/CHIZI-0618/AndroidTProxyShell)、[IPSET_LKM](https://github.com/TanakaLun/IPSET_LKM) 与 [KsuWebUIStandalone](https://github.com/KOWX712/KsuWebUIStandalone)。
-
-## 交流与贡献
-
-- [Telegram 群组](https://t.me/NetProxy_Magisk)
-- [提交 Issue](https://github.com/Fanju6/NetProxy-Magisk/issues)
-- [提交 Pull Request](https://github.com/Fanju6/NetProxy-Magisk/pulls)
-
-## 许可证
-
-[GPL-3.0 License](LICENSE)
-
-## Star
-
-[![Star History Chart](https://star-history.dera.page/svg?repos=Fanju6/NetProxy-Magisk&type=date&legend=top-left)](https://star-history.dera.page/#Fanju6/NetProxy-Magisk&type=date&legend=top-left)
+[工程准则](docs/maintenance/engineering.md) · [许可证](LICENSE) · [第三方声明](NOTICE)

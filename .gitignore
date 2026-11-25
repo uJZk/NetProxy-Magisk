@@ -61,3 +61,7 @@ docs/**/*.ntvs*
 docs/**/*.njsproj
 docs/**/*.sln
 docs/**/*.sw?
+
+# 两个渠道的 Android 核心由当前仓库构建。
+src/module/bin/sing-box
+src/module/cores/

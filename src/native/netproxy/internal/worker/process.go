@@ -84,7 +84,11 @@ func Start(ctx context.Context, options Options, executable string) (Status, err
 		_ = wakeProcess(pid)
 		return Status{State: "running", PID: pid}, nil
 	}
-	nearest, err := NextUpdate(ctx, options.Root, options.Now())
+	var nearest int64
+	var err error
+	if !options.RawOnly {
+		nearest, err = NextUpdate(ctx, options.Root, options.Now())
+	}
 	if err != nil && options.Telemetry == nil && options.APIConfig == "" {
 		return Status{}, err
 	}

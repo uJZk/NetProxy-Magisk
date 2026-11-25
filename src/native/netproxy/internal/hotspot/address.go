@@ -11,8 +11,16 @@ import (
 const DefaultSiteAddress = "192.2.0.1"
 
 type AccessPoint struct {
-	Name  string
-	Index int
+	Name    string
+	Index   int
+	Address string `json:",omitempty"`
+}
+
+func (p AccessPoint) SiteIP() string {
+	if p.Address == "" {
+		return DefaultSiteAddress
+	}
+	return p.Address
 }
 
 // SelectAccessPoint avoids guessing if more than one AP interface is active.

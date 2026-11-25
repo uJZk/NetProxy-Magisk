@@ -51,7 +51,7 @@ func ParseCertificate(domain string, certPEM, keyPEM []byte) (tls.Certificate, e
 	if err != nil {
 		return tls.Certificate{}, err
 	}
-	if err := leaf.VerifyHostname(domain); err != nil {
+	if err := leaf.VerifyHostname(domain); domain != "" && err != nil {
 		return tls.Certificate{}, err
 	}
 	pair.Leaf = leaf
