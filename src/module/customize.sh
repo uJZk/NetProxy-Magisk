@@ -13,10 +13,16 @@ if [ -d "$live/config" ] && [ "$MODPATH" != "$live" ]; then
   (
     mkdir -p /dev/netproxy || exit 1
     exec 9>/dev/netproxy/service.lock.flock
-    flock -w 20 9 9>&9 || exit 1
+    # BusyBox flock supports nonblocking acquisition but has no -w option.
+    waited=0
+    until flock -n 9 9>&9; do
+      [ "$waited" -lt 20 ] || { ui_print "等待服务锁超时：/dev/netproxy/service.lock.flock"; exit 1; }
+      sleep 1
+      waited=$((waited + 1))
+    done
     for dir in config logs data cores; do
       [ -d "$live/$dir" ] || continue
-      mkdir -p "$MODPATH/$dir" && cp -a "$live/$dir/." "$MODPATH/$dir/" || exit 1
+      mkdir -p "$MODPATH/$dir" && cp -a "$live/$dir/." "$MODPATH/$dir/" || { ui_print "复制旧版 $dir 目录失败"; exit 1; }
     done
     if [ -f "$live/cores/selected" ]; then
       cp -p "$live/bin/sing-box" "$MODPATH/bin/sing-box" || exit 1
