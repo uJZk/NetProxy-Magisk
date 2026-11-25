@@ -176,6 +176,15 @@ func SetRawConfigSource(ctx context.Context, o Options, address string, interval
 	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return errors.New("直通配置地址必须是有效的 HTTP(S) URL")
 	}
+	return setRawSchedule(ctx, o, interval, u, ua)
+}
+
+// SetRawInterval updates the schedule while retaining the configured source.
+func SetRawInterval(ctx context.Context, o Options, interval int64) error {
+	return setRawSchedule(ctx, o, interval, nil, "")
+}
+
+func setRawSchedule(ctx context.Context, o Options, interval int64, u *url.URL, ua string) error {
 	if interval < 0 || interval > int64((365*24*time.Hour)/time.Second) {
 		return errors.New("更新周期无效")
 	}
@@ -188,10 +197,13 @@ func SetRawConfigSource(ctx context.Context, o Options, address string, interval
 	if err != nil {
 		return err
 	}
-	changed := s.URL != u.String() || s.Interval != interval
-	s.URL = u.String()
+	changed := s.Interval != interval
+	if u != nil {
+		changed = changed || s.URL != u.String()
+		s.URL = u.String()
+		s.UserAgent = ua
+	}
 	s.Interval = interval
-	s.UserAgent = ua
 	if err = writeRawSettings(o, s); err != nil {
 		return err
 	}

@@ -132,3 +132,20 @@ func TestServiceDashboardForms(t *testing.T) {
 		}
 	}
 }
+
+func TestIntervalOnlyPreservesSource(t *testing.T) {
+	o := StandaloneOptions(t.TempDir())
+	o.StateFile = filepath.Join(o.ModuleDir, "state", "service.json")
+	if err := SetRawConfigSource(t.Context(), o, "https://example.org/config", 60, "test-agent"); err != nil {
+		t.Fatal(err)
+	}
+	for _, seconds := range []int64{600, 0} {
+		if err := SetRawInterval(t.Context(), o, seconds); err != nil {
+			t.Fatal(err)
+		}
+		s, err := readRawSettings(o)
+		if err != nil || s.URL != "https://example.org/config" || s.UserAgent != "test-agent" || s.Interval != seconds {
+			t.Fatalf("unexpected persisted schedule: %+v, %v", s, err)
+		}
+	}
+}

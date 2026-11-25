@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	moduleapp "github.com/Fanju6/NetProxy-Magisk/src/native/netproxy/internal/module"
@@ -65,11 +66,22 @@ func (c *cli) rawConfig(ctx context.Context, args []string) error {
 		if err := moduleapp.ClearRawCache(ctx, c.options); err != nil {
 			return err
 		}
-	case "set":
-		if len(pos) != 1 {
+	case "set", "set-interval":
+		if action == "set-interval" {
+			if len(pos) != 1 || flags.NFlag() != 0 {
+				return usageError("set-interval 需要更新间隔秒数")
+			}
+			seconds, err := strconv.ParseInt(pos[0], 10, 64)
+			if err != nil {
+				return errors.New("更新间隔必须是整数秒")
+			}
+			*interval = seconds
+			if err := moduleapp.SetRawInterval(ctx, c.options, *interval); err != nil {
+				return err
+			}
+		} else if len(pos) != 1 {
 			return errors.New("set 需要一个配置地址")
-		}
-		if err := moduleapp.SetRawConfigSource(ctx, c.options, pos[0], *interval, *agent); err != nil {
+		} else if err := moduleapp.SetRawConfigSource(ctx, c.options, pos[0], *interval, *agent); err != nil {
 			return err
 		}
 		if *interval > 0 {

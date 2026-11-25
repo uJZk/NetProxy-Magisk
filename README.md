@@ -26,6 +26,7 @@ MITM 导出为本项目 JSON 备份，包含私钥。导入支持本项目 JSON�
 netproxyctl service status
 netproxyctl config raw import /sdcard/Download/config.json
 netproxyctl config raw set --interval 86400 https://example.org/sing-box.json
+netproxyctl config raw set-interval 3600
 netproxyctl config raw update
 netproxyctl service start
 netproxyctl config raw panel

@@ -14,7 +14,7 @@ import Mitm from "./Mitm.vue";
 const current = ref(location.hash === "#mitm" ? "MITM" : "");
 const panel = ref(""),
   rawURL = ref(""),
-  interval = ref(0),
+  interval = ref("0"),
   auto = ref(false);
 const running = ref(false),
   serviceLoaded = ref(false);
@@ -31,11 +31,42 @@ async function refreshCores() {
   versions.value = await command<Record<string, string>>("core", "status");
 }
 const names = ["sing-box 配置", "sing-box 面板", "MITM", "日志"];
+let intervalTimer: ReturnType<typeof setTimeout> | undefined;
+let intervalSave: Promise<void> = Promise.resolve();
+let pendingInterval = false;
+const intervalError = ref("");
+
+function flushInterval() {
+  clearTimeout(intervalTimer);
+  if (pendingInterval) {
+    pendingInterval = false;
+    const seconds = interval.value;
+    intervalSave = intervalSave.then(async () => {
+      try {
+        if (!/^\d+$/.test(seconds)) throw Error("请输入更新间隔秒数，0 表示手动更新");
+        await command("config", "raw", "set-interval", seconds);
+        intervalError.value = "";
+      } catch (e) {
+        intervalError.value = e instanceof Error ? e.message : String(e);
+      }
+    });
+  }
+  return intervalSave;
+}
+
+function editInterval(value: string) {
+  interval.value = value;
+  pendingInterval = true;
+  clearTimeout(intervalTimer);
+  intervalTimer = setTimeout(flushInterval, 450);
+}
+
 async function run(fn: () => Promise<void>) {
   busy.value = true;
   message.value = "";
   errorMessage.value = "";
   try {
+    await flushInterval();
     await fn();
   } catch (e) {
     errorMessage.value = e instanceof Error ? e.message : String(e);
@@ -52,7 +83,7 @@ async function refresh() {
     interval: number;
   }>("config", "raw", "show");
   rawURL.value = raw.url;
-  interval.value = raw.interval;
+  interval.value = String(raw.interval);
   rawLoaded.value = true;
   const conf = await command<Config>("config", "read", "module/auto_start");
   autoRevision.value = conf.revision;
@@ -199,7 +230,10 @@ onMounted(() => run(refresh));
           placeholder="https://"
         />
         <VanField
-          v-model.number="interval"
+          :model-value="interval"
+          :error-message="intervalError"
+          @update:model-value="editInterval"
+          @blur="flushInterval"
           label="更新间隔（秒）"
           type="digit"
           placeholder="0 表示仅手动更新"

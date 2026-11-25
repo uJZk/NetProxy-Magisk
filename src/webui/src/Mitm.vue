@@ -39,14 +39,17 @@ function draft(): Site {
 }
 function showSaved(data: Config) {
   const s = JSON.parse(data.content);
-  fill({ ...s, target_ip: s.target_ip || "192.2.0.1", private_key: "" });
+  fill({ ...s, target_ip: s.target_ip || "192.2.0.1" });
   persisted = JSON.stringify(draft());
   revision.value = data.revision;
   const status = JSON.parse(data.status);
   errorMessage.value = status.state === "error" ? status.message : "";
 }
+function readSettings() {
+  return command<Config>("config", "read", "--include-private", "mitm");
+}
 async function read() {
-  showSaved(await command<Config>("config", "read", "mitm"));
+  showSaved(await readSettings());
 }
 function applySettings(payload: string) {
   if (!revision.value) throw Error("缺少配置版本，请重新打开 MITM 页面");
@@ -83,11 +86,6 @@ function flush() {
     const saved = await applySettings(payload);
     revision.value = saved.revision;
     persisted = payload;
-    if (s.private_key && site.value.private_key === s.private_key &&
-        site.value.certificate === s.certificate) {
-      persisted = JSON.stringify({ ...s, private_key: "" });
-      site.value.private_key = "";
-    }
     message.value = "";
     saveError.value = "";
   });
@@ -109,12 +107,7 @@ onBeforeUnmount(() => { if (revision.value) saveChanges(); });
 
 async function backup() {
   await flush();
-  const data = await command<Config>(
-    "config",
-    "read",
-    "--include-private",
-    "mitm",
-  );
+  const data = await readSettings();
   const s = JSON.parse(data.content);
   const mitm: Site = {
     enabled: s.enabled,
@@ -141,10 +134,10 @@ async function importFile(e: Event) {
       const result = importSite(text, draft());
       const saved = await applySettings(JSON.stringify(result.site));
       // A queued autosave must never write the pre-import form back to disk.
-      fill({ ...result.site, private_key: "" });
+      fill(result.site);
       revision.value = saved.revision;
       persisted = JSON.stringify(draft());
-      const current = await command<Config>("config", "read", "mitm");
+      const current = await readSettings();
       showSaved(current);
       if (current.revision !== saved.revision) {
         throw Error("导入后配置已被其他操作修改，已显示当前保存的设置");
@@ -178,7 +171,6 @@ onMounted(() => run(read));
         label-align="top"
         label="私钥 PEM"
         autosize
-        placeholder="沿用同一证书时可留空"
       />
       <h3>HTTPS 自定义接口</h3>
       <div v-for="(row, i) in rows" :key="i">
