@@ -20,13 +20,17 @@ function string(value: unknown) {
 }
 function routes(input: unknown, esp: boolean): Route[] {
   if (!Array.isArray(input) || input.length > 8) throw Error("接口列表无效");
-  return input.map((item) => {
+  return input.map((item, index) => {
     const route = record(item);
     if (!("json" in route)) throw Error("接口缺少 JSON");
-    return {
-      path: string(route.path),
-      json: esp ? JSON.parse(string(route.json)) : route.json,
-    };
+    let json = route.json;
+    if (esp && typeof json === "string") {
+      try { json = JSON.parse(json); }
+      catch { throw Error(`第 ${index + 1} 条 HTTPS 接口的响应不是有效 JSON`); }
+    } else if (esp && (json === null || typeof json !== "object")) {
+      throw Error(`第 ${index + 1} 条 HTTPS 接口的 json 需要文本、对象或数组`);
+    }
+    return { path: string(route.path).trim(), json };
   });
 }
 
@@ -60,16 +64,18 @@ export function importSite(
   const changed: string[] = [];
   if ("h2_site" in data) {
     const h2 = record(data.h2_site);
-    if ("cert" in h2 || "key" in h2) {
-      site.certificate = string(h2.cert);
-      site.private_key = string(h2.key);
+    const cert = string(h2.cert ?? "").trim();
+    const key = string(h2.key ?? "").trim();
+    if (cert || key) {
+      site.certificate = cert;
+      site.private_key = key;
       if (!site.certificate || !site.private_key)
         throw Error("备份需同时携带证书和私钥");
       changed.push("证书和私钥");
     }
   }
   if ("h2_routes" in data) {
-    site.routes = routes(data.h2_routes, true);
+    site.routes = routes(data.h2_routes ?? [], true);
     changed.push(`HTTPS 接口（${site.routes.length} 条）`);
   }
   if (

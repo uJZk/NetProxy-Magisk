@@ -91,6 +91,14 @@ async function backup() {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
+const pastedBackup = ref("");
+function previewBackup(text: string) {
+  if (new TextEncoder().encode(text).length > 262144) throw Error("备份超过 256 KiB");
+  const result = importSite(text, draft());
+  fill(result.site);
+  message.value = result.summary;
+  pastedBackup.value = "";
+}
 async function importFile(e: Event) {
   const el = e.target as HTMLInputElement;
   const f = el.files?.[0];
@@ -98,9 +106,7 @@ async function importFile(e: Event) {
   if (!f) return;
   await run(async () => {
     if (f.size > 262144) throw Error("备份超过 256 KiB");
-    const result = importSite(await f.text(), draft());
-    fill(result.site);
-    message.value = result.summary;
+    previewBackup(await f.text());
   });
 }
 onMounted(() => run(read));
@@ -138,15 +144,17 @@ onMounted(() => run(read));
       >
       <h3>MITM 备份</h3>
       <label
-        >导入本项目或 ESP32 备份<input
+        >导入备份<input
           type="file"
-          accept=".json,.yaml,.yml,.txt"
           @change="importFile"
       /></label>
+      <details><summary>粘贴备份文本</summary>
+        <VanField v-model="pastedBackup" type="textarea" label="YAML / JSON" autocomplete="off" />
+        <VanButton :disabled="!pastedBackup.trim()" @click="run(async () => previewBackup(pastedBackup))">预览导入</VanButton>
+      </details>
       <VanButton @click="run(backup)">导出备份（含私钥）</VanButton>
       <VanButton type="primary" @click="run(save)">保存设置</VanButton>
     </fieldset>
     <p role="status">{{ message }}</p>
-    <VanButton :disabled="busy" @click="run(read)">重新读取</VanButton>
   </section>
 </template>

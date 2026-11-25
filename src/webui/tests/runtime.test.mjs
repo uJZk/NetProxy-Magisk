@@ -98,3 +98,11 @@ test("本项目备份往返恢复开关地址证书和接口", () => {
     current,
   );
 });
+test("ESP32 接受嵌套 JSON、空证书对和空接口段", () => {
+  const sample = "h2_site: {cert: '', key: ''}\nh2_routes:\n  - path: /test\n    json: {ready: true, items: [1, 2]}";
+  assert.deepEqual(importSite(sample, current).site, {
+    ...current, routes: [{path: "/test", json: {ready: true, items: [1, 2]}}]
+  });
+  assert.deepEqual(importSite("h2_routes:", current).site.routes, []);
+  assert.throws(() => importSite("h2_site: {cert: certificate}", current));
+});
