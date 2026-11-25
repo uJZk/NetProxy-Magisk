@@ -1,6 +1,6 @@
 id=netproxy
 name=NetProxy
-version=v9.0.0-beta.2
+version=v9.0.0-beta.3
 versionCode=5
 author=uJZk
 description=完整 sing-box 配置、双渠道核心、MITM 与分模块日志

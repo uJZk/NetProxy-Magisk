@@ -9,7 +9,7 @@ export async function command<T>(...args: string[]): Promise<T> {
 function quote(value: string) {
   return "'" + value.replace(/'/g, "'\\''") + "'";
 }
-export async function submitFile(args: string[], content: string) {
+export async function submitFile<T = unknown>(args: string[], content: string) {
   const tmp = await shell(
     "umask 077 && mktemp /data/local/tmp/netproxy.XXXXXXXX",
   );
@@ -27,7 +27,7 @@ export async function submitFile(args: string[], content: string) {
       );
       if (result.code) throw Error("写入暂存文件失败");
     }
-    const result = decodeCtlResult(
+    const result = decodeCtlResult<T>(
       await shell(
         [
           "/data/adb/modules/netproxy/netproxyctl",
@@ -42,6 +42,7 @@ export async function submitFile(args: string[], content: string) {
       ),
     );
     if (!result.ok) throw Error(result.message);
+    return result.data as T;
   } finally {
     await shell("rm -f " + quote(path));
   }

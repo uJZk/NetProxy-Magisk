@@ -57,7 +57,7 @@ export function importSite(
         private_key: string(site.private_key),
         routes: routes(site.routes ?? [], false),
       },
-      summary: "已载入本项目 MITM 设置，保存后生效。",
+      summary: "已导入本项目 MITM 设置。",
     };
   }
   const site = { ...current };
@@ -87,7 +87,7 @@ export function importSite(
   return {
     site,
     summary: changed.length
-      ? "待保存：" + changed.join("、") + "。其他设置保持当前值。"
+      ? "已导入：" + changed.join("、") + "。其他设置保持当前值。"
       : "备份没有可导入的证书或接口。",
   };
 }
