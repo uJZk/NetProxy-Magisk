@@ -8,7 +8,9 @@ import (
 )
 
 func TestCustomRoutes(t *testing.T) {
+	largeBody := `{"message":"` + strings.Repeat("测试", 1024) + `"}`
 	h, err := NewHandler([]Route{
+		{Path: "/large", JSON: json.RawMessage(largeBody)},
 		{Path: "/abc", JSON: json.RawMessage(`{ "ok": true }`)},
 		{Path: "/abc/long", JSON: json.RawMessage(`{"choice":2}`)},
 	}, nil)
@@ -19,6 +21,7 @@ func TestCustomRoutes(t *testing.T) {
 		path, body string
 		status     int
 	}{
+		{"/large", largeBody, 200},
 		{"/X/ABC/?q=1", `{"ok":true}`, 200},
 		{"/abc/long/next", `{"choice":2}`, 200},
 		{"/abcx", "404 page not found\n", 404},
@@ -38,7 +41,6 @@ func TestRouteValidation(t *testing.T) {
 	for _, route := range []Route{
 		{Path: "/ping", JSON: json.RawMessage(`{}`)},
 		{Path: "/test", JSON: json.RawMessage(`{`)},
-		{Path: "/test", JSON: json.RawMessage(`"` + strings.Repeat("x", 1024) + `"`)},
 	} {
 		if _, err := NewHandler([]Route{route}, nil); err == nil {
 			t.Fatalf("accepted invalid route: %q", route.Path)

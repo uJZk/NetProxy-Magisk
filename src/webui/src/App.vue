@@ -20,6 +20,7 @@ const running = ref(false),
   serviceLoaded = ref(false);
 const busy = ref(false),
   message = ref(""),
+  errorMessage = ref(""),
   autoRevision = ref(""),
   rawLoaded = ref(false);
 const logKind = ref("core"),
@@ -33,10 +34,11 @@ const names = ["sing-box 配置", "sing-box 面板", "MITM", "日志"];
 async function run(fn: () => Promise<void>) {
   busy.value = true;
   message.value = "";
+  errorMessage.value = "";
   try {
     await fn();
   } catch (e) {
-    message.value = e instanceof Error ? e.message : String(e);
+    errorMessage.value = e instanceof Error ? e.message : String(e);
   } finally {
     busy.value = false;
   }
@@ -67,6 +69,7 @@ async function logs() {
 }
 function open(name: string) {
   message.value = "";
+  errorMessage.value = "";
   if (name === "sing-box 面板") {
     if (panel.value) location.assign(panel.value);
     return;
@@ -162,6 +165,7 @@ onMounted(() => run(refresh));
       </button>
       <h1>{{ title }}</h1>
     </header>
+    <p v-if="errorMessage" class="form-error" role="alert">{{ errorMessage }}</p>
     <JSONUIProvider v-if="!current" :registry="registry"
       ><Renderer :spec="spec" :registry="registry"
     /></JSONUIProvider>
@@ -204,7 +208,6 @@ onMounted(() => run(refresh));
         <label
           >从文件导入<input
             type="file"
-            accept=".json,.jsonc"
             @change="importFile"
         /></label>
         <VanButton
@@ -319,6 +322,11 @@ button,
 input,
 select {
   max-width: 100%;
+}
+.form-error {
+  color: #b42318;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .muted {
   opacity: 0.55;

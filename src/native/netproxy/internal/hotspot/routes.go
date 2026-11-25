@@ -59,8 +59,8 @@ func NewHandler(routes []Route, status func() any) (*Handler, error) {
 		}
 		seen[key] = true
 		var compact bytes.Buffer
-		if err := json.Compact(&compact, route.JSON); err != nil || compact.Len() > 1024 {
-			return nil, fmt.Errorf("HTTPS 接口 %q 的 JSON 无效或超过 1024 字节", path)
+		if err := json.Compact(&compact, route.JSON); err != nil {
+			return nil, fmt.Errorf("HTTPS 接口 %q 的 JSON 无效", path)
 		}
 		body := compact.Bytes()
 		sum := md5.Sum(body) // Compatibility with the original site's response header.

@@ -5,7 +5,7 @@ import {
   Field as VanField,
   Switch as VanSwitch,
 } from "vant";
-import { command, submitFile, type Config } from "./control";
+import { command, saveMitmBackup, submitFile, type Config } from "./control";
 import { importSite, type Site } from "./backup";
 
 const site = ref<Site>({
@@ -17,6 +17,8 @@ const site = ref<Site>({
 });
 const revision = ref(""),
   message = ref(""),
+  errorMessage = ref(""),
+  saveError = ref(""),
   busy = ref(false);
 const rows = ref<{ path: string; body: string }[]>([]);
 function fill(s: Site) {
@@ -35,21 +37,31 @@ function draft(): Site {
     routes: rows.value.map((r) => ({ path: r.path, json: JSON.parse(r.body) })),
   };
 }
-async function read() {
-  const data = await command<Config>("config", "read", "mitm");
+function showSaved(data: Config) {
   const s = JSON.parse(data.content);
   fill({ ...s, target_ip: s.target_ip || "192.2.0.1", private_key: "" });
   persisted = JSON.stringify(draft());
   revision.value = data.revision;
   const status = JSON.parse(data.status);
-  message.value = status.state === "error" ? status.message : "";
+  errorMessage.value = status.state === "error" ? status.message : "";
+}
+async function read() {
+  showSaved(await command<Config>("config", "read", "mitm"));
+}
+function applySettings(payload: string) {
+  if (!revision.value) throw Error("缺少配置版本，请重新打开 MITM 页面");
+  return submitFile<{ revision: string }>(
+    ["config", "apply", "--revision", revision.value, "mitm"], payload,
+  );
 }
 async function run(fn: () => Promise<void>) {
   busy.value = true;
+  errorMessage.value = "";
+  message.value = "";
   try {
     await fn();
   } catch (e) {
-    message.value = e instanceof Error ? e.message : String(e);
+    errorMessage.value = e instanceof Error ? e.message : String(e);
   } finally {
     busy.value = false;
   }
@@ -64,10 +76,11 @@ function flush() {
     if (!revision.value) return;
     const s = draft();
     const payload = JSON.stringify(s);
-    if (payload === persisted) return;
-    const saved = await submitFile<{ revision: string }>(
-      ["config", "apply", "--revision", revision.value, "mitm"], payload,
-    );
+    if (payload === persisted) {
+      saveError.value = "";
+      return;
+    }
+    const saved = await applySettings(payload);
     revision.value = saved.revision;
     persisted = payload;
     if (s.private_key && site.value.private_key === s.private_key &&
@@ -76,12 +89,14 @@ function flush() {
       site.value.private_key = "";
     }
     message.value = "";
+    saveError.value = "";
   });
   return queue;
 }
 function saveChanges() {
   void flush().catch((error: unknown) => {
-    message.value = "未保存：" + (error instanceof SyntaxError
+    message.value = "";
+    saveError.value = "未保存：" + (error instanceof SyntaxError
       ? "请补全接口的 JSON 响应" : error instanceof Error ? error.message : String(error));
   });
 }
@@ -108,26 +123,10 @@ async function backup() {
     private_key: s.private_key,
     routes: s.routes ?? [],
   };
-  const url = URL.createObjectURL(
-    new Blob(
-      [JSON.stringify({ format: "netproxy-mitm", version: 1, mitm }, null, 2)],
-      { type: "application/json" },
-    ),
+  const path = await saveMitmBackup(
+    JSON.stringify({ format: "netproxy-mitm", version: 1, mitm }, null, 2),
   );
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "netproxy-mitm.json";
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-}
-const pastedBackup = ref("");
-async function applyBackup(text: string) {
-  if (new TextEncoder().encode(text).length > 262144) throw Error("备份超过 256 KiB");
-  const result = importSite(text, draft());
-  fill(result.site);
-  await flush();
-  message.value = result.summary;
-  pastedBackup.value = "";
+  message.value = `备份已导出到 ${path}`;
 }
 async function importFile(e: Event) {
   const el = e.target as HTMLInputElement;
@@ -136,13 +135,32 @@ async function importFile(e: Event) {
   if (!f) return;
   await run(async () => {
     if (f.size > 262144) throw Error("备份超过 256 KiB");
-    await applyBackup(await f.text());
+    const text = await f.text();
+    clearTimeout(timer);
+    queue = queue.catch(() => {}).then(async () => {
+      const result = importSite(text, draft());
+      const saved = await applySettings(JSON.stringify(result.site));
+      // A queued autosave must never write the pre-import form back to disk.
+      fill({ ...result.site, private_key: "" });
+      revision.value = saved.revision;
+      persisted = JSON.stringify(draft());
+      const current = await command<Config>("config", "read", "mitm");
+      showSaved(current);
+      if (current.revision !== saved.revision) {
+        throw Error("导入后配置已被其他操作修改，已显示当前保存的设置");
+      }
+      saveError.value = "";
+      message.value = result.summary;
+    });
+    await queue;
   });
 }
 onMounted(() => run(read));
 </script>
 <template>
   <section>
+    <p v-if="errorMessage" class="form-error" role="alert">{{ errorMessage }}</p>
+    <p v-if="saveError" class="form-error" role="alert">{{ saveError }}</p>
 
     <fieldset :disabled="busy || !revision">
       <label>启用 MITM <VanSwitch v-model="site.enabled" /></label>
@@ -150,13 +168,16 @@ onMounted(() => run(read));
       <VanField
         v-model="site.certificate"
         type="textarea"
+        label-align="top"
         label="证书链 PEM"
         autosize
       />
       <VanField
         v-model="site.private_key"
         type="textarea"
+        label-align="top"
         label="私钥 PEM"
+        autosize
         placeholder="沿用同一证书时可留空"
       />
       <h3>HTTPS 自定义接口</h3>
@@ -165,6 +186,8 @@ onMounted(() => run(read));
           v-model="row.body"
           label="响应 JSON"
           type="textarea"
+          label-align="top"
+          autosize
         /><VanButton @click="rows.splice(i, 1)">删除接口</VanButton>
       </div>
       <VanButton
@@ -178,11 +201,7 @@ onMounted(() => run(read));
           type="file"
           @change="importFile"
       /></label>
-      <details><summary>粘贴备份文本</summary>
-        <VanField v-model="pastedBackup" type="textarea" label="YAML / JSON" autocomplete="off" />
-        <VanButton :disabled="!pastedBackup.trim()" @click="run(() => applyBackup(pastedBackup))">导入并应用</VanButton>
-      </details>
-      <VanButton @click="run(backup)">导出备份（含私钥）</VanButton>
+      <VanButton @click="run(backup)">导出备份</VanButton>
     </fieldset>
     <p v-if="message" role="status">{{ message }}</p>
   </section>
